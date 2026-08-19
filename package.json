@@ -1,0 +1,35 @@
+{
+  "name": "data-pipeline-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "jest --config jest.config.cjs",
+    "test:watch": "jest --config jest.config.cjs --watch",
+    "test:coverage": "jest --config jest.config.cjs --coverage"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.110.5",
+    "next": "16.2.10",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.10",
+    "jest": "^30.4.2",
+    "jest-environment-node": "^30.4.1",
+    "ts-jest": "^29.4.11",
+    "typescript": "^5"
+  }
+}
