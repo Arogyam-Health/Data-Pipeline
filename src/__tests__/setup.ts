@@ -4,3 +4,17 @@
 (process.env as Record<string, string>).WORKER_SECRET = "test-worker-secret";
 (process.env as Record<string, string>).SHIPROCKET_PABBLY_ENABLED = "false";
 (process.env as Record<string, string>).NODE_ENV = "test";
+(process.env as Record<string, string>).SHOPIFY_SHOP_DOMAIN = "test-shop.myshopify.com";
+(process.env as Record<string, string>).SHOPIFY_ACCESS_TOKEN = "test-shopify-access-token";
+(process.env as Record<string, string>).SHOPIFY_API_VERSION = "2026-04";
+(process.env as Record<string, string>).SHOPIFY_SYNC_ENABLED = "false";
+(process.env as Record<string, string>).SHOPIFY_SYNC_INTERVAL_MINUTES = "15";
+(process.env as Record<string, string>).SHOPIFY_INTERNAL_SYNC_SECRET = "test-shopify-sync-secret";
+(process.env as Record<string, string>).SHOPIFY_BACKFILL_DAYS = "90";
+(process.env as Record<string, string>).SHOPIFY_TEST_FETCH_DAYS = "3";
+(process.env as Record<string, string>).SHOPIFY_INCREMENTAL_BUFFER_MINUTES = "10";
+(process.env as Record<string, string>).SHOPIFY_PAGE_SIZE = "100";
+(process.env as Record<string, string>).SHOPIFY_MAX_FETCH_RETRIES = "6";
+(process.env as Record<string, string>).SHOPIFY_BACKFILL_CHUNK_DAYS = "3";
+(process.env as Record<string, string>).DASHBOARD_USERNAME = "team";
+(process.env as Record<string, string>).DASHBOARD_PASSWORD = "test-dashboard-password";
