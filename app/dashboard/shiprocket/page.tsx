@@ -55,21 +55,22 @@ interface AppliedFilter {
 const DEFAULT_COLUMNS = [
   "sr_order_id",
   "order_id",
-  "order_id_shopify_format",
   "awb",
+  "return_awb_code",
   "shipment_status",
   "current_status",
   "courier_name",
+  "etd",
+  "undelivered_reason",
+  "delivery_attempt_count",
+  "awb_assigned_date",
+  "pod_status",
+  "shipping_method",
   "customer_name_shopify",
-  "customer_phone_shopify",
   "payment_method",
   "order_total",
-  "delivered_date",
   "latest_crf_id",
   "latest_utr",
-  "latest_remittance_status",
-  "latest_remittance_date",
-  "coach",
 ];
 
 const MONO_COLUMNS = new Set([
@@ -83,7 +84,7 @@ const MONO_COLUMNS = new Set([
   "return_awb_code",
 ]);
 
-const COLUMN_STORAGE_KEY = "shiprocket-visible-columns-v1";
+const COLUMN_STORAGE_KEY = "shiprocket-visible-columns-v2";
 
 const SHORTCUTS: Array<{ label: string; filters: AppliedFilter[] }> = [
   { label: "7 days", filters: [{ field: "last_webhook_sync_at", operator: "last_7_days" }] },

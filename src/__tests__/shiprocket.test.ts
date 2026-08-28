@@ -376,6 +376,7 @@ describe("Shiprocket Parser", () => {
         "test-event-id"
       );
       expect(row.sr_order_id).toBe("SR-12345");
+      expect(row.order_id).toBe("ORD-67890");
       // scans1_* = scan[1] (newer)
       expect(row.scans1_status).toBe("Delivered");
       expect(row.scans1_location).toBe("Mumbai");
@@ -387,6 +388,45 @@ describe("Shiprocket Parser", () => {
       // Latest scan (scan[1] is newer)
       expect(row.scan_status).toBe("Delivered");
       expect(row.scan_location).toBe("Mumbai");
+    });
+
+    it("maps a live tracking webhook including order_id and RTO fields", () => {
+      const payload = {
+        awb: "77914492460",
+        courier_name: "BlueDart Surface 2Kg_Spl",
+        current_status: "RTO IN TRANSIT",
+        current_status_id: 55,
+        shipment_status: "RTO IN TRANSIT",
+        shipment_status_id: 46,
+        return_awb_code: "77151457062",
+        current_timestamp: "29 08 2026 04:13:38",
+        order_id: "62622899",
+        sr_order_id: 1511237326,
+        etd: "2026-08-23 00:00:00",
+        undelivered_reason: "COD Not Ready",
+        undelivered_reason_code: "SRNDR3",
+        delivery_attempt_count: 2,
+        awb_assigned_date: "2026-08-13 09:16:41",
+        pickup_scheduled_date: "2026-08-13 09:16:47",
+        pod_status: "OTP Based Delivery",
+        pod: "Available",
+        shipping_method: "SR",
+        delivered_date: "",
+        is_return: 0,
+        date: "2026-08-29 04:04:00",
+      };
+      const fields = extractWebhookFields(payload);
+      const row = toOrderRow(fields, payload, "evt-1");
+      expect(row.sr_order_id).toBe("1511237326");
+      expect(row.order_id).toBe("62622899");
+      expect(row.awb).toBe("77914492460");
+      expect(row.return_awb_code).toBe("77151457062");
+      expect(row.undelivered_reason).toBe("COD Not Ready");
+      expect(row.etd).toBe("2026-08-23 00:00:00");
+      expect(row.shipping_method).toBe("SR");
+      expect(row.pod_status).toBe("OTP Based Delivery");
+      expect(row.current_ts).toBe("29 08 2026 04:13:38");
+      expect(row.delivered_date).toBeNull();
     });
 
     it("defaults to UNKNOWN when sr_order_id is null", () => {
@@ -466,6 +506,7 @@ describe("Customer Name / Phone / Coach", () => {
 function sampleRow(overrides: Partial<ShiprocketOrderRow> = {}): ShiprocketOrderRow {
   return {
     sr_order_id: "1000000001",
+    order_id: "12345678",
     shipment_status_id: "7",
     shipment_status: "DELIVERED",
     current_status_id: "7",

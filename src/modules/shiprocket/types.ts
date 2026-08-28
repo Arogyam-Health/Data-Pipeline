@@ -83,6 +83,7 @@ export interface ShiprocketScan {
 /** Row shape for database upsert. */
 export interface ShiprocketOrderRow {
   sr_order_id: string;
+  order_id: string | null;
   shipment_status_id: string | null;
   shipment_status: string | null;
   current_status_id: string | null;

@@ -580,6 +580,7 @@ export function toOrderRow(
 
   return {
     sr_order_id: fields.sr_order_id ?? "UNKNOWN",
+    order_id: fields.order_id,
     shipment_status_id: fields.shipment_status_id,
     shipment_status: fields.shipment_status,
     current_status_id: fields.current_status_id,

@@ -177,6 +177,7 @@ async function processEvent(
       .upsert(
         {
           sr_order_id: fields.sr_order_id,
+          order_id: keepText(existing?.order_id, fields.order_id),
           unique_key: keepText(existing?.unique_key, fields.unique_key),
           shipment_status_id: merged.shipment_status_id,
           shipment_status: merged.shipment_status,
@@ -809,7 +810,7 @@ function mergeSparseOrder(
   const row: Record<string, unknown> = { ...(existing || {}), ...incoming };
   const keys = [
     "shipment_status_id", "shipment_status", "current_status_id", "current_status", "current_ts",
-    "order_status", "order_status_code", "payment_status", "payment_method", "courier_name", "awb",
+    "order_id", "order_status", "order_status_code", "payment_status", "payment_method", "courier_name", "awb",
     "channel_id", "shipment_id", "tracking_url", "etd", "order_date", "created_at_sr", "customer_name",
     "customer_email", "customer_phone", "pickup_location", "order_total", "tax", "products", "delivered_date",
     "return_awb_code", "awb_assigned_date", "pickup_scheduled_date", "pickup_exception_reason",
