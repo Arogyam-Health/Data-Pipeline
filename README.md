@@ -120,6 +120,7 @@ Copy from `.env.example`. Never use `NEXT_PUBLIC_` for secrets. Never put these 
 4. `SHIPROCKET_PABBLY_ENABLED` — `true` / `false` (default `false`). Keep false during parallel validation.
 5. `SHIPROCKET_INTERNAL_SYNC_SECRET` — optional Bearer secret for `/api/internal/shiprocket/*` (falls back to `WORKER_SECRET`)
 6. `SHIPROCKET_APPS_SCRIPT_WEBHOOK_URL` — existing Apps Script Web App URL used to fan-out the raw webhook (required before switching Shiprocket's single URL)
+7. `SHIPROCKET_LOG_WEBHOOK_PAYLOAD` — `true` / `false` (default `false`). When true, prints the full incoming webhook JSON to the server console.
 
 ### 5.3 Shopify
 

@@ -81,6 +81,11 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  if (env.SHIPROCKET_LOG_WEBHOOK_PAYLOAD) {
+    console.log("[delivery-events] complete Shiprocket webhook payload");
+    console.log(JSON.stringify(payload, null, 2));
+  }
+
   const appsScriptUrl = env.SHIPROCKET_APPS_SCRIPT_WEBHOOK_URL;
   if (appsScriptUrl) {
     const forwarded = await forwardRawWebhookToAppsScript({

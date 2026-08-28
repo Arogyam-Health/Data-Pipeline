@@ -3,6 +3,7 @@
 (process.env as Record<string, string>).SHIPROCKET_WEBHOOK_SECRET = "test-webhook-secret";
 (process.env as Record<string, string>).WORKER_SECRET = "test-worker-secret";
 (process.env as Record<string, string>).SHIPROCKET_PABBLY_ENABLED = "false";
+(process.env as Record<string, string>).SHIPROCKET_LOG_WEBHOOK_PAYLOAD = "false";
 (process.env as Record<string, string>).SHIPROCKET_INTERNAL_SYNC_SECRET = "test-shiprocket-internal-secret";
 (process.env as Record<string, string>).NODE_ENV = "test";
 (process.env as Record<string, string>).SHOPIFY_SHOP_DOMAIN = "test-shop.myshopify.com";

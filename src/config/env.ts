@@ -13,6 +13,11 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((v) => v === "true"),
+  /** Print the full incoming Shiprocket webhook JSON to the server console. */
+  SHIPROCKET_LOG_WEBHOOK_PAYLOAD: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
   /** Existing Apps Script Web App URL. Used only to fan-out the raw webhook. */
   SHIPROCKET_APPS_SCRIPT_WEBHOOK_URL: z.string().url().or(z.literal("")).optional(),
 
