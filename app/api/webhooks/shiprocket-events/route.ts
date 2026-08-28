@@ -22,7 +22,7 @@ function safeCompare(a: string, b: string): boolean {
 
 /** Shiprocket URL checks often use GET/HEAD. Auth is not required for reachability. */
 export async function GET() {
-  return NextResponse.json({ ok: true, service: "shiprocket-webhook" }, { status: 200 });
+  return NextResponse.json({ ok: true, service: "shipment-events" }, { status: 200 });
 }
 
 export async function HEAD() {
@@ -30,7 +30,7 @@ export async function HEAD() {
 }
 
 /**
- * POST /api/webhooks/shiprocket
+ * POST /api/webhooks/shiprocket-events
  *
  * Lightweight webhook receiver. Does:
  * 1. Authenticate webhook

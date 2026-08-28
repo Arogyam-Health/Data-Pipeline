@@ -68,7 +68,7 @@ export default function Home() {
             <ul className="text-gray-600 space-y-2">
               <li>
                 <code className="bg-gray-100 px-2 rounded">
-                  POST /api/webhooks/shiprocket
+                  POST /api/webhooks/shiprocket-events
                 </code>
               </li>
             </ul>

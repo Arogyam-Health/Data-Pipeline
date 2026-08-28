@@ -263,7 +263,7 @@ RAW LAYER (current)              STAGING LAYER (future)         DW LAYER (future
 
 | Component | Technology | Where It Lives |
 |-----------|-----------|----------------|
-| Webhook Endpoint | Next.js API Route | `app/api/webhooks/shiprocket/route.ts` |
+| Webhook Endpoint | Next.js API Route | `app/api/webhooks/shiprocket-events/route.ts` |
 | Queue | pgmq (PostgreSQL) | Supabase: `data_pipeline.shiprocket_webhooks` |
 | Worker | Supabase Edge Function | `supabase/functions/shiprocket-worker/` |
 | Cron Trigger | pg_cron | Supabase SQL: runs every 1 minute |
@@ -399,7 +399,7 @@ RAW LAYER (current)              STAGING LAYER (future)         DW LAYER (future
 
 | Component | Status | Details |
 |-----------|--------|---------|
-| Webhook endpoint | ✅ Done | `POST /api/webhooks/shiprocket` with timing-safe auth |
+| Webhook endpoint | ✅ Done | `POST /api/webhooks/shiprocket-events` with timing-safe auth |
 | Parser | ✅ Done | 600+ lines, ported from Apps Script with all field alternates |
 | Queue system | ✅ Done | pgmq with atomic ingest function |
 | Edge Function worker | ✅ Done | Deployed, reads queue, parses, upserts, delivers to Pabbly |
@@ -423,7 +423,7 @@ RAW LAYER (current)              STAGING LAYER (future)         DW LAYER (future
 **Solution (Option B — Keep Both):**
 ```javascript
 // Add one line in Apps Script to forward to our API
-UrlFetchApp.fetch('https://your-api.com/api/webhooks/shiprocket', {
+UrlFetchApp.fetch('https://your-api.com/api/webhooks/shiprocket-events', {
   method: 'post',
   contentType: 'application/json',
   headers: { 'x-webhook-key': '<SHIPROCKET_WEBHOOK_SECRET>' },
