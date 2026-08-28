@@ -37,7 +37,7 @@ Next.js + Supabase pipeline for **Shiprocket** (webhook push), **Shopify** (API 
 
 ```
 Shiprocket webhook
-  → POST /api/webhooks/shiprocket-events
+  → POST /api/webhooks/delivery-events
   → authenticate x-api-key
   → integration_events + pgmq shiprocket_webhooks
   → pg_cron every minute
@@ -215,7 +215,7 @@ Shiprocket allows only one webhook URL. To keep Apps Script + Sheet + production
 
 ```
 SHIPROCKET  (one URL)
-    → POST /api/webhooks/shiprocket-events
+    → POST /api/webhooks/delivery-events
          → forward raw body to existing Apps Script URL
          → enqueue into Supabase
 ```
@@ -225,7 +225,7 @@ SHIPROCKET  (one URL)
 3. Test fan-out with curl (below). Confirm a **test** event hits the Sheet **and** Supabase before switching.
 4. Only then change Shiprocket's one webhook URL to:
 
-   `https://<your-app>/api/webhooks/shiprocket-events?hook_key=<SHIPROCKET_WEBHOOK_SECRET>`
+   `https://<your-app>/api/webhooks/delivery-events?hook_key=<SHIPROCKET_WEBHOOK_SECRET>`
 
 5. Do **not** edit the Apps Script, Sheet, or production Pabbly URL.
 
@@ -234,7 +234,7 @@ Auth accepted: `x-api-key` (Shiprocket dashboard), `Authorization: Bearer`, `x-w
 If the Apps Script forward fails, this route returns **502** so Shiprocket retries. Production Sheet is not silently dropped.
 
 ```bash
-curl -X POST "http://localhost:3000/api/webhooks/shiprocket-events?hook_key=<SHIPROCKET_WEBHOOK_SECRET>" \
+curl -X POST "http://localhost:3000/api/webhooks/delivery-events?hook_key=<SHIPROCKET_WEBHOOK_SECRET>" \
   -H "Content-Type: application/json" \
   -d '{"sr_order_id":"1000000001","order_id":"12345678","current_status":"Delivered","awb":"TESTAWB001"}'
 ```

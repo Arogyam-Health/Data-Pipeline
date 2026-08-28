@@ -594,7 +594,7 @@ describe("Apps Script fan-out", () => {
   });
 
   it("reads the webhook secret from query hook_key when headers are absent", () => {
-    const url = new URL("https://example.test/api/webhooks/shiprocket-events?hook_key=test-webhook-secret");
+    const url = new URL("https://example.test/api/webhooks/delivery-events?hook_key=test-webhook-secret");
     const secret = extractShiprocketWebhookSecret({
       headers: { get: () => null },
       url: url.toString(),

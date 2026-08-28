@@ -22,7 +22,7 @@ function safeCompare(a: string, b: string): boolean {
 
 /** Shiprocket URL checks often use GET/HEAD. Auth is not required for reachability. */
 export async function GET() {
-  return NextResponse.json({ ok: true, service: "shipment-events" }, { status: 200 });
+  return NextResponse.json({ ok: true, service: "delivery-events" }, { status: 200 });
 }
 
 export async function HEAD() {
@@ -30,7 +30,7 @@ export async function HEAD() {
 }
 
 /**
- * POST /api/webhooks/shiprocket-events
+ * POST /api/webhooks/delivery-events
  *
  * Lightweight webhook receiver. Does:
  * 1. Authenticate webhook
@@ -54,7 +54,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 2. Read raw body
   let rawBody: string;
   try {
     rawBody = await request.text();
@@ -72,7 +71,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 3. Validate JSON
   let payload: Record<string, unknown>;
   try {
     payload = JSON.parse(rawBody);
@@ -104,13 +102,9 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 4. Compute deterministic SHA-256 hash
   const requestHash = computeRequestHash(rawBody);
-
-  // 5. Store event + enqueue atomically via database function
   const supabase = getSupabaseClient();
 
-  // Sanitize headers: remove sensitive values before storing
   const safeHeaders: Record<string, string> = {};
   request.headers.forEach((value, key) => {
     const lowerKey = key.toLowerCase();
@@ -158,7 +152,6 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  // 6. Return quickly
   return NextResponse.json(
     {
       received: true,
