@@ -105,6 +105,7 @@ export async function POST(request: NextRequest) {
     const lowerKey = key.toLowerCase();
     if (
       lowerKey === "authorization" ||
+      lowerKey === "x-api-key" ||
       lowerKey === "x-webhook-secret" ||
       lowerKey === "x-webhook-key" ||
       lowerKey === "cookie"

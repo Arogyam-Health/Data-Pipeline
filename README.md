@@ -38,7 +38,7 @@ Next.js + Supabase pipeline for **Shiprocket** (webhook push), **Shopify** (API 
 ```
 Shiprocket webhook
   → POST /api/webhooks/shiprocket
-  → authenticate x-webhook-key
+  → authenticate x-api-key
   → integration_events + pgmq shiprocket_webhooks
   → pg_cron every minute
   → Edge Function shiprocket-worker
@@ -114,7 +114,7 @@ Copy from `.env.example`. Never use `NEXT_PUBLIC_` for secrets. Never put these 
 
 ### 5.2 Shiprocket / Pabbly / worker
 
-1. `SHIPROCKET_WEBHOOK_SECRET` — `x-webhook-key` on incoming webhooks
+1. `SHIPROCKET_WEBHOOK_SECRET` — `x-api-key` on incoming webhooks (Shiprocket dashboard Auth Token)
 2. `WORKER_SECRET` — Edge Function / cron auth
 3. `PABBLY_SHIPROCKET_URL` — optional
 4. `SHIPROCKET_PABBLY_ENABLED` — `true` / `false` (default `false`). Keep false during parallel validation.
@@ -229,7 +229,7 @@ SHIPROCKET  (one URL)
 
 5. Do **not** edit the Apps Script, Sheet, or production Pabbly URL.
 
-Auth accepted: `Authorization: Bearer`, `x-webhook-secret`, `x-webhook-key`, or `?hook_key=`.
+Auth accepted: `x-api-key` (Shiprocket dashboard), `Authorization: Bearer`, `x-webhook-secret`, `x-webhook-key`, or `?hook_key=`.
 
 If the Apps Script forward fails, this route returns **502** so Shiprocket retries. Production Sheet is not silently dropped.
 

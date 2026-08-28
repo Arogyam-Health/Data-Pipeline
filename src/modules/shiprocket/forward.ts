@@ -13,6 +13,7 @@ export function extractShiprocketWebhookSecret(request: {
   url?: string;
 }): string | null {
   const header =
+    request.headers.get("x-api-key") ??
     request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ??
     request.headers.get("x-webhook-secret") ??
     request.headers.get("x-webhook-key");
