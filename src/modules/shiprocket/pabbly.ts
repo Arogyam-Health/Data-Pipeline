@@ -1,5 +1,6 @@
 import { getSupabaseClient } from "@/lib/supabase/admin";
 import { logger } from "@/lib/logger";
+import { buildLegacyPabblyPayload } from "./legacy";
 
 /**
  * Send processed Shiprocket data to Pabbly webhook.
@@ -63,9 +64,8 @@ export async function sendToPabbly(
     return { success: false, error: deliveryError?.message };
   }
 
-  // Read the full order row
   const { data: orderRow, error: readError } = await supabase
-    .from("shiprocket_orders")
+    .from("shiprocket_order_explorer")
     .select("*")
     .eq("sr_order_id", srOrderKey)
     .single();
@@ -79,57 +79,11 @@ export async function sendToPabbly(
     return { success: false, error: readError?.message };
   }
 
-  // Build Pabbly payload matching Apps Script column headers
-  const pabblyPayload: Record<string, unknown> = {
-    "Shiprocket Unique Key": orderRow.unique_key ?? "",
-    "Sr Order Id": orderRow.sr_order_id ?? "",
-    "Shipment Status Id": orderRow.shipment_status_id ?? "",
-    "Shipment Status": orderRow.shipment_status ?? "",
-    "Scans 1 Status": orderRow.scans1_status ?? "",
-    "Scans 1 Sr-status-label": orderRow.scans1_sr_status_label ?? "",
-    "Scans 1 Sr-status": orderRow.scans1_sr_status ?? "",
-    "Scans 1 Location": orderRow.scans1_location ?? "",
-    "Scans 1 Date": orderRow.scans1_date ?? "",
-    "Scans 1 Activity": orderRow.scans1_activity ?? "",
-    "Scans 0 Status": orderRow.scans0_status ?? "",
-    "Scans 0 Sr-status-label": orderRow.scans0_sr_status_label ?? "",
-    "Scans 0 Sr-status": orderRow.scans0_sr_status ?? "",
-    "Scans 0 Location": orderRow.scans0_location ?? "",
-    "Scans 0 Date": orderRow.scans0_date ?? "",
-    "Scans 0 Activity": orderRow.scans0_activity ?? "",
-    "Order Id": orderRow.order_id ?? "",
-    "Is Return": orderRow.is_return ?? "",
-    Etd: orderRow.etd ?? "",
-    "Current Timestamp": orderRow.current_ts ?? "",
-    "Current Status Id": orderRow.current_status_id ?? "",
-    "Current Status": orderRow.current_status ?? "",
-    "Courier Name": orderRow.courier_name ?? "",
-    "Channel Id": orderRow.channel_id ?? "",
-    Awb: orderRow.awb ?? "",
-    "Order Date": orderRow.order_date ?? "",
-    "Created At": orderRow.created_at_sr ?? "",
-    "Customer Name": orderRow.customer_name ?? "",
-    "Customer Email": orderRow.customer_email ?? "",
-    "Customer Phone": orderRow.customer_phone ?? "",
-    "Pickup Location": orderRow.pickup_location ?? "",
-    "Payment Status": orderRow.payment_status ?? "",
-    "Payment Method": orderRow.payment_method ?? "",
-    "Order Total": orderRow.order_total ?? "",
-    Tax: orderRow.tax ?? "",
-    "Order Status": orderRow.order_status ?? "",
-    "Order Status Code": orderRow.order_status_code ?? "",
-    "Shipment ID": orderRow.shipment_id ?? "",
-    "Tracking URL": orderRow.tracking_url ?? "",
-    "Delivered Date": orderRow.delivered_date ?? "",
-    Products: orderRow.products ?? "",
-    "Last Local API Sync At": "",
-    "Last Webhook Sync At": orderRow.last_webhook_sync_at ?? "",
-    "Sheet Action": sheetAction,
-    "Sheet Row Number": sheetRowNumber,
-    "Sheet Error": "",
-    "Webhook Event Id": eventId,
-    "Pabbly Idempotency Key": eventId,
-  };
+  const pabblyPayload = buildLegacyPabblyPayload(orderRow, {
+    sheetAction,
+    sheetRowNumber,
+    eventId,
+  });
 
   try {
     const response = await fetch(pabblyUrl, {

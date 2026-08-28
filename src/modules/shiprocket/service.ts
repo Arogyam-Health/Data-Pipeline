@@ -3,7 +3,9 @@ import { logger } from "@/lib/logger";
 import { calculateRetryDelay, isDeadLetter } from "@/lib/integrations/retry";
 import { extractWebhookFields, toOrderRow } from "./parser";
 import { sendToPabbly } from "./pabbly";
-import type { ShiprocketWebhookPayload } from "./types";
+import { isStaleWebhook, mergeShiprocketOrderRow } from "./merge";
+import { enrichShiprocketOrder } from "./enrichment";
+import type { ShiprocketOrderRow, ShiprocketWebhookPayload } from "./types";
 import { getEnv } from "@/config/env";
 
 /**
@@ -82,24 +84,46 @@ export async function processShiprocketEvent(
       current_status: fields.current_status,
     });
 
-    // 4. Build the order row
-    const row = toOrderRow(
+    // 4. Load existing current-state row for sparse merge + freshness
+    const { data: existing } = await supabase
+      .from("shiprocket_orders")
+      .select("*")
+      .eq("sr_order_id", fields.sr_order_id)
+      .maybeSingle();
+
+    const incomingRow = toOrderRow(
       fields,
       payload as Record<string, unknown>,
       eventId
     );
+    const stale = isStaleWebhook(fields.current_ts, existing?.current_ts);
+    const row = mergeShiprocketOrderRow(
+      (existing as ShiprocketOrderRow | null) ?? null,
+      incomingRow,
+      { staleCurrentState: stale }
+    );
 
-    // 5. Upsert shiprocket_orders
+    if (stale) {
+      logger.info("Stale Shiprocket webhook preserved in history only", {
+        event_id: eventId,
+        sr_order_id: fields.sr_order_id,
+        incoming_ts: fields.current_ts,
+        existing_ts: existing?.current_ts,
+      });
+    }
+
+    // 5. Upsert shiprocket_orders (source-aware merged row)
     const { error: upsertError } = await supabase
       .from("shiprocket_orders")
       .upsert(
         {
           ...row,
-          unique_key: fields.unique_key,
-          current_ts: fields.current_ts,
-          raw_payload: payload,
+          unique_key: fields.unique_key || existing?.unique_key,
+          current_ts: stale ? existing?.current_ts ?? fields.current_ts : row.current_ts,
+          raw_payload: stale && existing?.raw_payload ? existing.raw_payload : payload,
           integration_event_id: eventId,
           last_webhook_sync_at: new Date().toISOString(),
+          last_local_api_sync_at: existing?.last_local_api_sync_at ?? null,
         },
         { onConflict: "sr_order_id" }
       );
@@ -126,7 +150,21 @@ export async function processShiprocketEvent(
       sr_order_id: fields.sr_order_id,
     });
 
-    // 6. Send to Pabbly if enabled
+    if (!stale && fields.all_scans.length > 0) {
+      await replaceShiprocketScans(fields.sr_order_id, fields.awb, fields.all_scans);
+    }
+
+    try {
+      await enrichShiprocketOrder(fields.sr_order_id);
+    } catch (enrichErr) {
+      logger.warn("Shopify enrichment failed after order upsert", {
+        event_id: eventId,
+        sr_order_id: fields.sr_order_id,
+        error: enrichErr instanceof Error ? enrichErr.message : String(enrichErr),
+      });
+    }
+
+    // 6. Send to Pabbly if enabled (default false — Apps Script remains production)
     if (env.SHIPROCKET_PABBLY_ENABLED && env.PABBLY_SHIPROCKET_URL) {
       const { data: existingOrder } = await supabase
         .from("shiprocket_orders")
@@ -222,5 +260,56 @@ export async function processShiprocketEvent(
     }
 
     return { success: false, error: errorMessage };
+  }
+}
+
+async function replaceShiprocketScans(
+  srOrderId: string,
+  awb: string | null,
+  scans: Array<{
+    status: string | null;
+    sr_status: string | null;
+    sr_status_label: string | null;
+    activity: string | null;
+    location: string | null;
+    date: string | null;
+    latitude: string | null;
+    longitude: string | null;
+  }>
+): Promise<void> {
+  const supabase = getSupabaseClient();
+  const { error: deleteError } = await supabase
+    .from("shiprocket_scans")
+    .delete()
+    .eq("sr_order_id", srOrderId);
+  if (deleteError) {
+    logger.warn("Failed to clear previous Shiprocket scans", {
+      sr_order_id: srOrderId,
+      error: deleteError.message,
+    });
+    return;
+  }
+
+  const rows = scans.map((scan, index) => ({
+    sr_order_id: srOrderId,
+    awb,
+    scan_index: index,
+    scan_date: scan.date || null,
+    status: scan.status || null,
+    sr_status: scan.sr_status || null,
+    sr_status_label: scan.sr_status_label || null,
+    activity: scan.activity || null,
+    location: scan.location || null,
+    latitude: scan.latitude || null,
+    longitude: scan.longitude || null,
+  }));
+
+  if (rows.length === 0) return;
+  const { error: insertError } = await supabase.from("shiprocket_scans").insert(rows);
+  if (insertError) {
+    logger.warn("Failed to insert Shiprocket scans", {
+      sr_order_id: srOrderId,
+      error: insertError.message,
+    });
   }
 }

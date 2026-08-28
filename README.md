@@ -1,6 +1,6 @@
 # Data Pipeline Server
 
-Next.js + Supabase pipeline for **Shiprocket** (webhook push) and **Shopify** (API pull). Dashboards are Next.js + Recharts. The existing Google Apps Script → Google Sheet flow stays live and is not replaced.
+Next.js + Supabase pipeline for **Shiprocket** (webhook push), **Shopify** (API pull), **Meta Ads** (Marketing API pull), and **GA4** (Analytics Data API pull via Vercel OIDC + Google WIF). Dashboards are Next.js + Recharts. Existing Google Apps Script → Google Sheet flows stay live and are not replaced.
 
 ---
 
@@ -9,8 +9,10 @@ Next.js + Supabase pipeline for **Shiprocket** (webhook push) and **Shopify** (A
 1. Ingests Shiprocket webhooks, queues them, and writes `data_pipeline.shiprocket_orders`.
 2. Optionally forwards delivered Shiprocket orders to Pabbly (WhatsApp).
 3. Pulls Shopify orders via GraphQL Admin API into `data_pipeline.shopify_*`.
-4. Serves `/dashboard` (Shiprocket) and `/dashboard/shopify` (Shopify).
-5. Does **not** read from Google Sheets. The sheet and Supabase are two independent readers of Shopify.
+4. Pulls Meta Ads Insights via Marketing API into `data_pipeline.meta_*` using the same existing token/account as Apps Script.
+5. Pulls GA4 Daily / Channel / UTM reports into `data_pipeline.ga4_*` using Vercel OIDC + Google Workload Identity Federation. No Google private key.
+6. Serves `/dashboard` (Shiprocket analytics), `/dashboard/shiprocket` (explorer), `/dashboard/shopify` (Shopify), `/dashboard/meta` (Meta), and `/dashboard/ga4` (GA4).
+7. Does **not** read from Google Sheets. Sheets and Supabase are independent readers.
 
 ---
 
@@ -22,8 +24,10 @@ Next.js + Supabase pipeline for **Shiprocket** (webhook push) and **Shopify** (A
 4. Shopify GraphQL sync (test / backfill / incremental / repair) — working.
 5. Shopify local auto-poll while `npm run dev` is running — working (`SHOPIFY_SYNC_ENABLED=true`).
 6. Shopify dashboard (Recharts, filters, sheet-style order columns) — working.
-7. Raw Shopify JSON — **not stored**.
-8. Tests — `npm test`.
+7. Meta Ads sync + `/dashboard/meta` (Recharts) — added as a parallel pipeline. `META_SYNC_ENABLED=false` until a one-day test passes.
+8. GA4 sync + `/dashboard/ga4` (Recharts) — added as a parallel pipeline. `GA4_SYNC_ENABLED=false` until WIF + a one-day test pass.
+9. Raw Shopify/Meta/GA4 JSON — **not stored**.
+10. Tests — `npm test`.
 
 ---
 
@@ -83,15 +87,18 @@ Supabase pg_cron  7,22,37,52 * * * *
 1. Install: `npm install`
 2. Copy env: `cp .env.example .env`
 3. Fill **placeholders only** in `.env`. Never commit `.env`.
-4. Apply SQL migrations **001 → 012** in order (Supabase SQL Editor or `supabase db push`).
+4. Apply SQL migrations **001 → 024** in order (Supabase SQL Editor or `supabase db push`).
 5. Expose schema `analytics` in Supabase → Project Settings → Data API (alongside `public` and `data_pipeline`).
 6. Deploy Shiprocket worker: `supabase functions deploy shiprocket-worker`
 7. Set worker secret: `supabase secrets set WORKER_SECRET=<your-secret>`
 8. Create Shiprocket cron in the SQL Editor (template below). Do **not** put URLs/secrets in a migration file.
 9. Run tests: `npm test`
 10. Start app: `npm run dev` → `http://localhost:3000`
-11. Shiprocket dashboard: `http://localhost:3000/dashboard`
-12. Shopify dashboard: `http://localhost:3000/dashboard/shopify` (HTTP Basic)
+11. Shiprocket analytics: `http://localhost:3000/dashboard`
+12. Shiprocket explorer: `http://localhost:3000/dashboard/shiprocket` (HTTP Basic)
+13. Shopify dashboard: `http://localhost:3000/dashboard/shopify` (HTTP Basic)
+14. Meta dashboard: `http://localhost:3000/dashboard/meta` (HTTP Basic)
+15. GA4 dashboard: `http://localhost:3000/dashboard/ga4` (HTTP Basic)
 
 ---
 
@@ -110,7 +117,9 @@ Copy from `.env.example`. Never use `NEXT_PUBLIC_` for secrets. Never put these 
 1. `SHIPROCKET_WEBHOOK_SECRET` — `x-webhook-key` on incoming webhooks
 2. `WORKER_SECRET` — Edge Function / cron auth
 3. `PABBLY_SHIPROCKET_URL` — optional
-4. `SHIPROCKET_PABBLY_ENABLED` — `true` / `false` (default `false`)
+4. `SHIPROCKET_PABBLY_ENABLED` — `true` / `false` (default `false`). Keep false during parallel validation.
+5. `SHIPROCKET_INTERNAL_SYNC_SECRET` — optional Bearer secret for `/api/internal/shiprocket/*` (falls back to `WORKER_SECRET`)
+6. `SHIPROCKET_APPS_SCRIPT_WEBHOOK_URL` — existing Apps Script Web App URL used to fan-out the raw webhook (required before switching Shiprocket's single URL)
 
 ### 5.3 Shopify
 
@@ -127,9 +136,39 @@ Copy from `.env.example`. Never use `NEXT_PUBLIC_` for secrets. Never put these 
 11. `SHOPIFY_MAX_FETCH_RETRIES` — default `6`
 12. `SHOPIFY_BACKFILL_CHUNK_DAYS` — default `3`
 
-### 5.4 Dashboard
+### 5.4 Meta Ads
 
-1. `DASHBOARD_USERNAME` — HTTP Basic user for `/dashboard/shopify` and `/api/shopify/*`
+1. `META_ACCESS_TOKEN` — existing Apps Script token (never commit)
+2. `META_AD_ACCOUNT_ID` — existing `act_…` account
+3. `META_API_VERSION` — default `v23.0`
+4. `META_SYNC_ENABLED` — `true` to allow scheduled today sync
+5. `META_INTERNAL_SYNC_SECRET` — Bearer secret for `/api/internal/meta/*`
+6. `META_BACKFILL_DAYS` — default `90`
+7. `META_BACKFILL_CHUNK_DAYS` — default `3`
+8. `META_PAGE_LIMIT` — default `500`
+9. `META_MAX_RETRIES` — default `5`
+10. `META_RECENT_REPAIR_DAYS` — default `2` (3 calendar dates)
+11. `META_EXTENDED_INSIGHTS_ENABLED` — default `false`
+12. `META_METADATA_SYNC_ENABLED` — default `false`
+13. `META_BREAKDOWN_SYNC_ENABLED` — default `false`
+
+See [`META.md`](./META.md) and [`META_SETUP.md`](./META_SETUP.md).
+
+### 5.5 GA4
+
+1. `GA4_PROPERTY_ID` — GA4 property ID (`123…` or `properties/123…`)
+2. `GCP_PROJECT_ID` / `GCP_PROJECT_NUMBER` — WIF project identifiers (not secrets)
+3. `GCP_SERVICE_ACCOUNT_EMAIL` — impersonated GA4 pipeline service account
+4. `GCP_WORKLOAD_IDENTITY_POOL_ID` / `GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID`
+5. `GA4_SYNC_ENABLED` — `true` to allow scheduled recent sync (default `false`)
+6. `GA4_INTERNAL_SYNC_SECRET` — Bearer secret for `/api/internal/ga4/*`
+7. Backfill / retry knobs — see [`.env.example`](./.env.example) and [`GA4_SETUP.md`](./GA4_SETUP.md)
+
+Do **not** set `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY` or `GOOGLE_SERVICE_ACCOUNT_JSON`.
+
+### 5.6 Dashboard
+
+1. `DASHBOARD_USERNAME` — HTTP Basic user for `/dashboard/shopify`, `/dashboard/meta`, `/dashboard/ga4`, `/dashboard/shiprocket`, `/api/shopify/*`, `/api/meta/*`, `/api/ga4/*`, `/api/shiprocket/*`
 2. `DASHBOARD_PASSWORD` — HTTP Basic password
 
 ---
@@ -148,24 +187,56 @@ Copy from `.env.example`. Never use `NEXT_PUBLIC_` for secrets. Never put these 
 10. `010_shopify_indexes_and_security.sql`
 11. `011_shopify_analytics_views.sql`
 12. `012_shopify_dashboard_functions.sql`
+13. `013_meta_ads_schema.sql`
+14. `014_meta_ads_indexes_security.sql`
+15. `015_meta_ads_analytics.sql`
+16. `016_meta_ads_dashboard_functions.sql`
+17. `017_meta_ads_filters.sql` — Meta dashboard query filters
+18. `018_ga4_schema.sql`
+19. `019_ga4_indexes_security.sql`
+20. `020_ga4_analytics.sql`
+21. `021_ga4_dashboard_functions.sql`
+22. `022_shiprocket_enrichment.sql` — extra webhook fields, enrichment, scans
+23. `023_shiprocket_indexes_security.sql`
+24. `024_shiprocket_legacy_analytics.sql` — Sheet-label view + explorer + data quality
+25. `025_shiprocket_remittance.sql` — billing fields + remittance tables
+26. `026_shiprocket_remittance_indexes_security.sql`
+27. `027_shiprocket_order_360.sql` — one-row-per-order explorer + remittance summary
 
-After 011–012, expose the `analytics` schema in the Data API or Shopify APIs return `Invalid schema: analytics`.
+After 011–027, expose the `analytics` schema in the Data API or Shopify/Meta/GA4 APIs return `Invalid schema: analytics`.
 
 ---
 
 ## 7. Shiprocket
 
-### 7.1 Webhook
+### 7.1 Webhook (single Shiprocket URL fan-out)
 
-1. Endpoint: `POST /api/webhooks/shiprocket`
-2. Header: `x-webhook-key: <SHIPROCKET_WEBHOOK_SECRET>`
-3. Returns quickly after enqueue; the worker does the heavy work.
+Shiprocket allows only one webhook URL. To keep Apps Script + Sheet + production Pabbly intact **and** land the same raw event in Supabase:
+
+```
+SHIPROCKET  (one URL)
+    → POST /api/webhooks/shiprocket
+         → forward raw body to existing Apps Script URL
+         → enqueue into Supabase
+```
+
+1. Copy the **current** Apps Script Web App URL from Shiprocket (do not change it yet) into `SHIPROCKET_APPS_SCRIPT_WEBHOOK_URL`.
+2. Deploy / restart this app. Keep `SHIPROCKET_PABBLY_ENABLED=false`.
+3. Test fan-out with curl (below). Confirm a **test** event hits the Sheet **and** Supabase before switching.
+4. Only then change Shiprocket's one webhook URL to:
+
+   `https://<your-app>/api/webhooks/shiprocket?hook_key=<SHIPROCKET_WEBHOOK_SECRET>`
+
+5. Do **not** edit the Apps Script, Sheet, or production Pabbly URL.
+
+Auth accepted: `Authorization: Bearer`, `x-webhook-secret`, `x-webhook-key`, or `?hook_key=`.
+
+If the Apps Script forward fails, this route returns **502** so Shiprocket retries. Production Sheet is not silently dropped.
 
 ```bash
-curl -X POST http://localhost:3000/api/webhooks/shiprocket \
+curl -X POST "http://localhost:3000/api/webhooks/shiprocket?hook_key=<SHIPROCKET_WEBHOOK_SECRET>" \
   -H "Content-Type: application/json" \
-  -H "x-webhook-key: <SHIPROCKET_WEBHOOK_SECRET>" \
-  -d '{"order_id":199656,"status":"77","current_status":"Delivered","awb":"1234567890"}'
+  -d '{"sr_order_id":"1000000001","order_id":"12345678","current_status":"Delivered","awb":"TESTAWB001"}'
 ```
 
 ### 7.2 Cron (SQL Editor only — placeholders)
@@ -196,8 +267,20 @@ SELECT cron.schedule(
 ### 7.4 Pabbly
 
 1. Enabled only if `SHIPROCKET_PABBLY_ENABLED=true` and `PABBLY_SHIPROCKET_URL` is set.
-2. Orders whose id contains `TEST` are skipped so WhatsApp is not sent.
-3. Table: `data_pipeline.shiprocket_pabbly_deliveries`.
+2. **Default is false.** Apps Script remains the production Pabbly sender during parallel validation.
+3. Preview without sending: `GET /api/internal/shiprocket/pabbly-preview/{srOrderId}`.
+4. Table: `data_pipeline.shiprocket_pabbly_deliveries`.
+5. See [`SHIPROCKET_VALIDATION.md`](./SHIPROCKET_VALIDATION.md).
+
+### 7.5 Dashboard / enrichment / remittance
+
+1. Canonical Shiprocket UI: `http://localhost:3000/dashboard/shiprocket` (HTTP Basic). `/dashboard` is the global hub only.
+2. Shopify enrichment backfill: `POST /api/internal/shiprocket/enrichment/backfill`
+3. Reconciliation is **not** invented — no Shiprocket REST URLs were added.
+4. Remittance is XLS/XLSX import only. Official remittance API was not verified.
+5. Import: `POST /api/internal/shiprocket/remittance/import` (Bearer) or the Data Quality upload on the dashboard.
+6. One CRF/UTR can cover many AWBs. UTR is not unique per order.
+7. Keep `SHIPROCKET_PABBLY_ENABLED=false` during parallel validation.
 
 ---
 
@@ -313,7 +396,11 @@ Offset (`:07/:22/:37/:52`) avoids colliding with Apps Script (`:00/:15/:30/:45`)
 2. Reads Shiprocket analytics / last orders.
 3. Not locked by the Shopify Basic auth.
 
-### 9.3 Shopify
+### 9.3 Shopify / Meta nav
+
+Both dashboards link to each other and to Shiprocket. Runtime behavior of Shiprocket and Shopify is unchanged.
+
+### 9.4 Shopify
 
 1. URL: `/dashboard/shopify`
 2. Auth: HTTP Basic (`DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD`).
@@ -331,6 +418,26 @@ Offset (`:07/:22/:37/:52`) avoids colliding with Apps Script (`:00/:15/:30/:45`)
 8. Product revenue = line price × qty − line discount. Never `SUM(order.total_price)` on line rows.
 9. Payment mapping: COD if gateway looks like cash/COD; PREPAID if Shopify Payments / Razorpay / PayU / PhonePe / UPI / card / wallet / GoKwik / etc.
 
+### 9.4 Meta Ads
+
+1. URL: `/dashboard/meta`
+2. Auth: same HTTP Basic as Shopify.
+3. Reads Supabase only. Never calls the Meta Marketing API from the browser.
+4. Charts: KPIs, daily spend/purchases/ROAS, funnel, campaign / ad set / ad tables, video, action explorer, sync health.
+5. Date presets: today, `7d`, `30d`, `90d`, custom. Dates use the Meta ad account timezone.
+6. Breakdown panels stay hidden behind “Breakdown sync not enabled” until that flag is validated.
+7. Setup and Sheet comparison: [`META_SETUP.md`](./META_SETUP.md), [`META_VALIDATION.md`](./META_VALIDATION.md).
+
+### 9.5 GA4
+
+1. URL: `/dashboard/ga4`
+2. Auth: same HTTP Basic as Shopify/Meta.
+3. Reads Supabase only. Never calls the Google Analytics Data API from the browser.
+4. Charts: KPIs, daily trend, funnel, channel table, UTM table, sync health.
+5. Date presets: today, `7d`, `30d`, `90d`, custom. Dates use the GA4 reporting timezone.
+6. Setup and Sheet comparison: [`GA4_SETUP.md`](./GA4_SETUP.md), [`GA4_VALIDATION.md`](./GA4_VALIDATION.md).
+7. Apps Script + Google Sheets stay production until an explicit human cutover.
+
 ---
 
 ## 10. Security (must follow)
@@ -339,9 +446,9 @@ Offset (`:07/:22/:37/:52`) avoids colliding with Apps Script (`:00/:15/:30/:45`)
 2. Never put project URLs or secrets in `supabase/migrations/*`.
 3. Never prefix secrets with `NEXT_PUBLIC_`.
 4. `.gitignore` ignores `.env`, `.env.*` (except `.env.example`), `credentials.json`, and service-account JSON.
-5. Shopify token is not written to PostgreSQL and is not returned by APIs.
-6. Internal sync routes require Bearer `<SHOPIFY_INTERNAL_SYNC_SECRET>`.
-7. Shopify dashboard / `/api/shopify/*` require HTTP Basic.
+5. Shopify and Meta tokens, and Google access/OIDC tokens, are not written to PostgreSQL and are not returned by APIs.
+6. Internal sync routes require Bearer `<SHOPIFY_INTERNAL_SYNC_SECRET>`, `<META_INTERNAL_SYNC_SECRET>`, or `<GA4_INTERNAL_SYNC_SECRET>`.
+7. Shopify/Meta/GA4 dashboards and `/api/shopify/*` `/api/meta/*` `/api/ga4/*` require HTTP Basic.
 8. Logs must not include tokens, GraphQL bodies, or raw PII dumps.
 
 ---
@@ -364,6 +471,24 @@ curl http://localhost:3000/api/internal/shopify/sync/status \
 
 curl -X POST http://localhost:3000/api/internal/shopify/sync \
   -H "Authorization: Bearer <SHOPIFY_INTERNAL_SYNC_SECRET>"
+
+# Meta (replace the Bearer placeholder)
+curl -X POST http://localhost:3000/api/internal/meta/sync/test \
+  -H "Authorization: Bearer <META_INTERNAL_SYNC_SECRET>" \
+  -H "Content-Type: application/json" \
+  -d '{"since":"YYYY-MM-DD","until":"YYYY-MM-DD"}'
+
+curl http://localhost:3000/api/internal/meta/sync/status \
+  -H "Authorization: Bearer <META_INTERNAL_SYNC_SECRET>"
+
+# GA4 (replace the Bearer placeholder)
+curl -X POST http://localhost:3000/api/internal/ga4/connection-test \
+  -H "Authorization: Bearer <GA4_INTERNAL_SYNC_SECRET>"
+
+curl -X POST http://localhost:3000/api/internal/ga4/sync/test \
+  -H "Authorization: Bearer <GA4_INTERNAL_SYNC_SECRET>" \
+  -H "Content-Type: application/json" \
+  -d '{"dataset":"daily","since":"YYYY-MM-DD","until":"YYYY-MM-DD"}'
 ```
 
 ---
@@ -406,5 +531,10 @@ curl -X POST http://localhost:3000/api/internal/shopify/sync \
 
 1. [`SHOPIFY_SETUP.md`](./SHOPIFY_SETUP.md) — Shopify scopes, sync modes, cron, security.
 2. [`SHOPIFY_VALIDATION.md`](./SHOPIFY_VALIDATION.md) — sheet vs Supabase checks.
-3. [`METABASE_SETUP.md`](./METABASE_SETUP.md) — Shiprocket Metabase only. Shopify uses `/dashboard/shopify`, not Metabase.
-4. [`.env.example`](./.env.example) — empty placeholders.
+3. [`META.md`](./META.md) — Meta architecture, plan, terms, strategy, and code map.
+4. [`META_SETUP.md`](./META_SETUP.md) — Meta env names, sync modes, cron templates.
+5. [`META_VALIDATION.md`](./META_VALIDATION.md) — Meta Report sheet vs `analytics.meta_ads_sheet_parity`.
+6. [`METABASE_SETUP.md`](./METABASE_SETUP.md) — Shiprocket Metabase only. Shopify, Meta, and GA4 use Next.js + Recharts dashboards. Metabase can also read `analytics.ga4_*`.
+7. [`GA4_SETUP.md`](./GA4_SETUP.md) — WIF, env names, sync modes, cron templates.
+8. [`GA4_VALIDATION.md`](./GA4_VALIDATION.md) — Sheets vs `analytics.ga4_*_sheet_parity`.
+9. [`.env.example`](./.env.example) — empty placeholders.

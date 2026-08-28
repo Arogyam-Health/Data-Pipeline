@@ -1,7 +1,36 @@
 import { extractWebhookFields, toOrderRow } from "../modules/shiprocket/parser";
 import { computeRequestHash } from "../lib/integrations/hashing";
 import { calculateRetryDelay, isDeadLetter } from "../lib/integrations/retry";
-import type { ShiprocketWebhookPayload } from "../modules/shiprocket/types";
+import type { ShiprocketOrderRow, ShiprocketWebhookPayload } from "../modules/shiprocket/types";
+import {
+  extractShopifyOrderId,
+  normalizeShopifyLegacyPhone,
+  deriveCoach,
+  resolveShiprocketShopifyEnrichment,
+} from "../modules/shiprocket/enrichment";
+import { mergeShiprocketOrderRow, isStaleWebhook } from "../modules/shiprocket/merge";
+import { buildLegacyPabblyPayload } from "../modules/shiprocket/legacy";
+import { validateFilterRequest, ShiprocketFilterError, GLOBAL_SEARCH_COLUMNS, SHIPROCKET_FILTER_FIELDS } from "../modules/shiprocket/filters";
+import {
+  SHIPROCKET_EXPLORER_COLUMN_SET,
+  SHIPROCKET_EXPLORER_COLUMNS,
+} from "../modules/shiprocket/explorer-contract";
+import * as XLSX from "xlsx";
+import { getEnv } from "../config/env";
+import {
+  extractShiprocketWebhookSecret,
+  forwardRawWebhookToAppsScript,
+} from "../modules/shiprocket/forward";
+import {
+  buildSyntheticRemittanceWorkbook,
+  cellText,
+  hashRemittanceFile,
+  indexOrdersForRemittanceMatch,
+  matchRemittanceOrderRow,
+  normalizeBusinessIdentifier,
+  parseRemittanceWorkbook,
+} from "../modules/shiprocket/remittance";
+import { classifyShiprocketStatus, computeOverviewFromRows } from "../modules/shiprocket/status";
 
 // ============================================================
 // Test fixtures (fake data, no real PII)
@@ -290,7 +319,7 @@ describe("Shiprocket Parser", () => {
       expect(fields.awb).toBeNull();
       expect(fields.tracking_url).toBeNull();
       expect(fields.customer_email).toBeNull();
-      expect(fields.is_return).toBe(false);
+      expect(fields.is_return).toBeNull();
     });
 
     it("extracts Title Case alternates (Shiprocket Unique Key, etc.)", () => {
@@ -369,6 +398,433 @@ describe("Shiprocket Parser", () => {
       );
       expect(row.sr_order_id).toBe("UNKNOWN");
     });
+  });
+});
+
+describe("Shopify order id extraction", () => {
+  it("extracts the first 8-digit sequence", () => {
+    expect(extractShopifyOrderId("62622018")).toBe("62622018");
+    expect(extractShopifyOrderId("62622018-C")).toBe("62622018");
+    expect(extractShopifyOrderId("abc62622018xyz")).toBe("62622018");
+    expect(extractShopifyOrderId("6251749")).toBe("");
+    expect(extractShopifyOrderId("")).toBe("");
+    expect(extractShopifyOrderId(null)).toBe("");
+  });
+});
+
+describe("Customer Name / Phone / Coach", () => {
+  it("uses Shopify name and never falls back to Shiprocket", () => {
+    const matched = resolveShiprocketShopifyEnrichment("62622018", {
+      shopifyOrderId: "gid://shopify/Order/1",
+      customerName: "Test Customer",
+      shippingPhone: "+91 98765 43210",
+      mainPhone: "9999999999",
+    });
+    expect(matched.customerName).toBe("Test Customer");
+    expect(matched.customerPhone).toBe("919876543210");
+    expect(matched.coach).toBe("Misba");
+    expect(matched.orderIdShopifyFormat).toBe("62622018");
+    expect(matched.matchedShopifyOrder).toBe(true);
+
+    const unmatched = resolveShiprocketShopifyEnrichment("62622018", null);
+    expect(unmatched.customerName).toBe("");
+    expect(unmatched.customerPhone).toBe("");
+    expect(unmatched.matchedShopifyOrder).toBe(false);
+  });
+
+  it("prefers shipping phone then main phone", () => {
+    expect(
+      resolveShiprocketShopifyEnrichment("12345678", {
+        shopifyOrderId: "1",
+        customerName: "Test Customer",
+        shippingPhone: "",
+        mainPhone: "9876543210",
+      }).customerPhone
+    ).toBe("919876543210");
+
+    expect(
+      resolveShiprocketShopifyEnrichment("12345678", {
+        shopifyOrderId: "1",
+        customerName: "Test Customer",
+        shippingPhone: "",
+        mainPhone: "",
+      }).customerPhone
+    ).toBe("");
+  });
+
+  it("normalizes punctuation without adding +", () => {
+    expect(normalizeShopifyLegacyPhone("+91 98765 43210")).toBe("919876543210");
+    expect(normalizeShopifyLegacyPhone("98765-43210")).toBe("919876543210");
+  });
+
+  it("sets Coach from Order Id presence only", () => {
+    expect(deriveCoach("12345678")).toBe("Misba");
+    expect(deriveCoach("")).toBe("");
+  });
+});
+
+function sampleRow(overrides: Partial<ShiprocketOrderRow> = {}): ShiprocketOrderRow {
+  return {
+    sr_order_id: "1000000001",
+    shipment_status_id: "7",
+    shipment_status: "DELIVERED",
+    current_status_id: "7",
+    current_status: "DELIVERED",
+    current_ts: "2026-01-02T12:00:00Z",
+    order_status: "DELIVERED",
+    order_status_code: "7",
+    payment_status: "PAID",
+    payment_method: "COD",
+    courier_name: "BlueDart",
+    awb: "TESTAWB001",
+    channel_id: "1",
+    shipment_id: "SH1",
+    tracking_url: "https://example.test/track",
+    is_return: false,
+    etd: "2026-01-03",
+    order_date: "2026-01-01",
+    created_at_sr: "2026-01-01T00:00:00Z",
+    customer_name: "Shiprocket Name",
+    customer_email: "test@example.com",
+    customer_phone: "9999999999",
+    pickup_location: "WH1",
+    order_total: "1499",
+    tax: "0",
+    products: "[]",
+    delivered_date: "2026-01-02",
+    scan_status: null,
+    scan_sr_status_label: null,
+    scan_sr_status: null,
+    scan_location: null,
+    scan_date: null,
+    scan_activity: null,
+    scans1_status: "DELIVERED",
+    scans1_sr_status_label: null,
+    scans1_sr_status: null,
+    scans1_location: null,
+    scans1_date: null,
+    scans1_activity: null,
+    scans0_status: "IN TRANSIT",
+    scans0_sr_status_label: null,
+    scans0_sr_status: null,
+    scans0_location: null,
+    scans0_date: null,
+    scans0_activity: null,
+    ...overrides,
+  };
+}
+
+describe("Sparse webhook merging", () => {
+  it("keeps API-enriched fields when a tracking webhook omits them", () => {
+    const existing = sampleRow();
+    const incoming = sampleRow({
+      customer_email: null,
+      payment_method: null,
+      order_total: null,
+      current_status: "OUT FOR DELIVERY",
+      current_status_id: "6",
+      current_ts: "2026-01-02T15:00:00Z",
+      scans1_status: "OUT FOR DELIVERY",
+    });
+    const merged = mergeShiprocketOrderRow(existing, incoming);
+    expect(merged.customer_email).toBe("test@example.com");
+    expect(merged.payment_method).toBe("COD");
+    expect(merged.order_total).toBe("1499");
+    expect(merged.current_status).toBe("OUT FOR DELIVERY");
+    expect(merged.current_status_id).toBe("6");
+    expect(merged.current_ts).toBe("2026-01-02T15:00:00Z");
+    expect(merged.scans1_status).toBe("OUT FOR DELIVERY");
+  });
+});
+
+describe("Stale webhook", () => {
+  it("does not regress current status when incoming timestamp is older", () => {
+    expect(isStaleWebhook("2026-01-01T10:00:00Z", "2026-01-02T12:00:00Z")).toBe(true);
+    const existing = sampleRow({ current_status: "DELIVERED", current_ts: "2026-01-02T12:00:00Z" });
+    const incoming = sampleRow({
+      current_status: "IN TRANSIT",
+      current_ts: "2026-01-01T10:00:00Z",
+    });
+    const merged = mergeShiprocketOrderRow(existing, incoming, { staleCurrentState: true });
+    expect(merged.current_status).toBe("DELIVERED");
+    expect(merged.current_ts).toBe("2026-01-02T12:00:00Z");
+  });
+});
+
+describe("Pabbly payload contract", () => {
+  it("uses exact legacy keys and Shopify-derived customer fields", () => {
+    const payload = buildLegacyPabblyPayload({
+      sr_order_id: "1000000001",
+      unique_key: "shiprocket_order:1000000001",
+      order_id: "12345678",
+      customer_name_shopify: "Test Customer",
+      customer_phone_shopify: "919876543210",
+      coach: "Misba",
+      order_id_shopify_format: "12345678",
+    });
+    expect(payload).toHaveProperty("Customer Name", "Test Customer");
+    expect(payload).toHaveProperty("Customer Phone", "919876543210");
+    expect(payload).toHaveProperty("Coach", "Misba");
+    expect(payload).toHaveProperty("order id shopify format", "12345678");
+    expect(payload).toHaveProperty("Column 47", "");
+    expect(payload).toHaveProperty("Column 67", "");
+    expect(payload).not.toHaveProperty("Raw Shiprocket JSON");
+    expect(Object.keys(payload)).not.toContain("customer_name");
+  });
+});
+
+describe("Apps Script fan-out", () => {
+  it("reads the webhook secret from query hook_key when headers are absent", () => {
+    const url = new URL("https://example.test/api/webhooks/shiprocket?hook_key=test-webhook-secret");
+    const secret = extractShiprocketWebhookSecret({
+      headers: { get: () => null },
+      url: url.toString(),
+    });
+    expect(secret).toBe("test-webhook-secret");
+  });
+
+  it("forwards the raw body to Apps Script and does not treat a 500 as success", async () => {
+    const fetchMock = jest.fn().mockResolvedValue({ ok: false, status: 500 });
+    const originalFetch = global.fetch;
+    global.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      const result = await forwardRawWebhookToAppsScript({
+        url: "https://script.example.test/macros/s/fake/exec?hook_key=test",
+        rawBody: '{"sr_order_id":"1000000001"}',
+      });
+      expect(result.ok).toBe(false);
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://script.example.test/macros/s/fake/exec?hook_key=test",
+        expect.objectContaining({
+          method: "POST",
+          body: '{"sr_order_id":"1000000001"}',
+          redirect: "manual",
+        })
+      );
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it("treats Apps Script 302 as a successful forward", async () => {
+    const fetchMock = jest.fn().mockResolvedValue({ ok: false, status: 302 });
+    const originalFetch = global.fetch;
+    global.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      const result = await forwardRawWebhookToAppsScript({
+        url: "https://script.google.com/macros/s/fake/exec",
+        rawBody: '{"sr_order_id":"1000000001"}',
+      });
+      expect(result.ok).toBe(true);
+      expect(result.status).toBe(302);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+});
+
+describe("Parallel Pabbly mode", () => {
+  it("keeps production send disabled by default", () => {
+    expect(process.env.SHIPROCKET_PABBLY_ENABLED).toBe("false");
+    expect(getEnv().SHIPROCKET_PABBLY_ENABLED).toBe(false);
+  });
+});
+
+describe("Filter builder", () => {
+  it("accepts safe AND filters and grouped OR", () => {
+    const parsed = validateFilterRequest({
+      filters: [
+        { field: "shipment_status", operator: "contains", value: "DELIVERED" },
+        { field: "current_status", operator: "in", value: ["OUT FOR DELIVERY", "DELIVERED"] },
+        { field: "order_total", operator: "gte", value: 1499 },
+        { field: "delivered_date", operator: "between", value: ["2026-01-01", "2026-01-31"] },
+        { field: "customer_phone_shopify", operator: "not_empty" },
+        { or: [{ field: "payment_method", operator: "eq", value: "COD" }, { field: "payment_method", operator: "eq", value: "Prepaid" }] },
+      ],
+      sort: [{ field: "delivered_date", direction: "desc" }],
+      page: 1,
+      pageSize: 25,
+    });
+    expect(parsed.filters).toHaveLength(6);
+  });
+
+  it("rejects unknown fields, operators, SQL, bad dates, and huge pages", () => {
+    expect(() => validateFilterRequest({ filters: [{ field: "drop table", operator: "eq", value: "x" }] })).toThrow(ShiprocketFilterError);
+    expect(() => validateFilterRequest({ filters: [{ field: "shipment_status", operator: "union select", value: "x" }] })).toThrow(ShiprocketFilterError);
+    expect(() => validateFilterRequest({ filters: [{ field: "not_a_real_field", operator: "eq", value: "x" }] })).toThrow(ShiprocketFilterError);
+    expect(() => validateFilterRequest({ filters: [{ field: "delivered_date", operator: "on", value: "not-a-date" }] })).toThrow(ShiprocketFilterError);
+    expect(() => validateFilterRequest({ pageSize: 5000 })).toThrow();
+  });
+});
+
+describe("Explorer query contract", () => {
+  it("keeps filter/search columns inside shiprocket_order_explorer projection", () => {
+    for (const field of SHIPROCKET_FILTER_FIELDS) {
+      if (field.key === "raw_payload") continue;
+      expect(SHIPROCKET_EXPLORER_COLUMN_SET.has(field.column)).toBe(true);
+    }
+    for (const column of GLOBAL_SEARCH_COLUMNS) {
+      expect(SHIPROCKET_EXPLORER_COLUMN_SET.has(column)).toBe(true);
+    }
+    expect(SHIPROCKET_EXPLORER_COLUMNS).toContain("billing_name");
+    expect(SHIPROCKET_EXPLORER_COLUMNS).toContain("billing_email");
+    expect(SHIPROCKET_EXPLORER_COLUMNS).toContain("billing_phone");
+  });
+});
+
+describe("Remittance parser", () => {
+  it("reads both sheets, keeps Remmitance Type, and does not treat UTR as unique", () => {
+    const parsed = parseRemittanceWorkbook(buildSyntheticRemittanceWorkbook());
+    expect(parsed.crfRows).toHaveLength(1);
+    expect(parsed.awbRows).toHaveLength(3);
+    expect(parsed.crfRows[0].crf_id).toBe("CRF-TEST-001");
+    expect(parsed.crfRows[0].utr).toBe("IN20000000000000");
+    expect(parsed.awbRows.every((row) => row.utr === "IN20000000000000")).toBe(true);
+    expect(parsed.awbRows.map((row) => row.awb)).toEqual(["TESTAWB001", "TESTAWB002", "TESTAWB003"]);
+    expect(parsed.awbRows[0].remittance_type).toBe("Standard");
+    expect(new Set(parsed.awbRows.map((row) => row.utr)).size).toBe(1);
+    expect(hashRemittanceFile(buildSyntheticRemittanceWorkbook())).toBe(
+      hashRemittanceFile(buildSyntheticRemittanceWorkbook())
+    );
+  });
+
+  it("preserves numeric AWB identifiers without scientific notation", () => {
+    expect(normalizeBusinessIdentifier("1.904076086893E+12")).toBe("1904076086893");
+    expect(normalizeBusinessIdentifier("1904076086893")).toBe("1904076086893");
+
+    const sheet: XLSX.WorkSheet = {
+      B2: { t: "n", v: 1.904076086893e12, w: "1904076086893" },
+    };
+    expect(cellText(sheet, "B2")).toBe("1904076086893");
+
+    const awbHeader = [...["CRF ID", "AWB", "Delivered Date", "Shipped Date", "Order Id", "Courier", "Order Value", "Channel Name", "Remmitance Type", "Remittance Date", "UTR", "total_adjusted_amt", "Linked CRF Ids"]];
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(
+      workbook,
+      XLSX.utils.aoa_to_sheet([
+        awbHeader,
+        ["CRF-TEST-001", "1904076086893", "2026-08-01", "2026-07-28", "62622018", "Delhivery", 1499, "Shopify", "Standard", "2026-08-10", "IN20000000000000", 0, ""],
+      ]),
+      "AWB level report"
+    );
+    XLSX.utils.book_append_sheet(
+      workbook,
+      XLSX.utils.aoa_to_sheet([
+        ["Date", "CRF ID", "COD Available", "Instant COD Available", "Standard COD Available", "Early COD Available", "Freight Charges from COD", "RTO Reversal Amount", "Remittance Amount", "Remittance Method", "UTR", "Adjusted Amount", "Status", "remarks", "Early COD Charges", "Instant COD Charges"],
+        ["2026-08-10", "CRF-TEST-001", 100, 0, 100, 0, 0, 0, 100, "NEFT", "IN20000000000000", 0, "Remittance success", "", 0, 0],
+      ]),
+      "CRF level report"
+    );
+    const parsed = parseRemittanceWorkbook(Buffer.from(XLSX.write(workbook, { type: "buffer", bookType: "xlsx" })));
+    expect(parsed.awbRows[0].awb).toBe("1904076086893");
+    expect(parsed.awbRows[0].order_id).toBe("62622018");
+  });
+});
+
+describe("Remittance matching", () => {
+  const index = indexOrdersForRemittanceMatch([
+    { sr_order_id: "SR-1", awb: "TESTAWB001", order_id: "12345678" },
+    { sr_order_id: "SR-2", awb: "TESTAWB009", order_id: "99999999" },
+    { sr_order_id: "SR-3", awb: "", order_id: "DUP-ORDER" },
+    { sr_order_id: "SR-4", awb: "", order_id: "DUP-ORDER" },
+  ]);
+
+  it("matches exact AWB", () => {
+    expect(matchRemittanceOrderRow({ awb: "TESTAWB001", order_id: "nope" }, index)).toEqual({
+      status: "matched",
+      matchedSrOrderId: "SR-1",
+    });
+  });
+
+  it("matches numeric AWB strings normalized on both sides", () => {
+    const numericIndex = indexOrdersForRemittanceMatch([
+      { sr_order_id: "SR-N", awb: "1904076086893", order_id: "62622018" },
+    ]);
+    expect(matchRemittanceOrderRow({ awb: "1904076086893", order_id: "" }, numericIndex)).toEqual({
+      status: "matched",
+      matchedSrOrderId: "SR-N",
+    });
+    expect(matchRemittanceOrderRow({ awb: "1.904076086893E+12", order_id: "" }, numericIndex)).toEqual({
+      status: "matched",
+      matchedSrOrderId: "SR-N",
+    });
+  });
+
+  it("matches exact order id when AWB is absent", () => {
+    expect(matchRemittanceOrderRow({ awb: "", order_id: "12345678" }, index)).toEqual({
+      status: "matched",
+      matchedSrOrderId: "SR-1",
+    });
+  });
+
+  it("does not pick an arbitrary row for an ambiguous order id", () => {
+    expect(matchRemittanceOrderRow({ awb: "", order_id: "DUP-ORDER" }, index)).toEqual({
+      status: "ambiguous",
+      matchedSrOrderId: null,
+    });
+  });
+
+  it("keeps unmatched settlement rows", () => {
+    expect(matchRemittanceOrderRow({ awb: "MISSINGAWB", order_id: "MISSINGORDER" }, index)).toEqual({
+      status: "unmatched",
+      matchedSrOrderId: null,
+    });
+  });
+});
+
+describe("KPI and table consistency", () => {
+  it("classifies RTO Delivered as rto, not delivered", () => {
+    expect(classifyShiprocketStatus("RTO Delivered", "RTO Delivered")).toBe("rto");
+    expect(classifyShiprocketStatus("Delivered", "")).toBe("delivered");
+  });
+
+  it("uses the same population for table count and KPIs", () => {
+    const rows = [
+      { sr_order_id: "1", status_bucket: "delivered", shipment_status: "Delivered", courier_name: "Delhivery", payment_method: "COD", order_total_num: 100, remittance_match_status: "unmatched" },
+      { sr_order_id: "2", status_bucket: "delivered", shipment_status: "Delivered", courier_name: "Delhivery", payment_method: "Prepaid", order_total_num: 200, remittance_match_status: "matched", latest_crf_id: "CRF-TEST-001", latest_utr: "IN20000000000000", latest_order_settlement_value: 200 },
+      { sr_order_id: "3", status_bucket: "delivered", shipment_status: "Delivered", courier_name: "BlueDart", payment_method: "COD", order_total_num: 300, remittance_match_status: "unmatched" },
+      { sr_order_id: "4", status_bucket: "in_transit", shipment_status: "IN TRANSIT", courier_name: "Delhivery", payment_method: "COD", order_total_num: 400, remittance_match_status: "unmatched" },
+      { sr_order_id: "5", status_bucket: "rto", shipment_status: "RTO Delivered", courier_name: "Delhivery", payment_method: "COD", order_total_num: 500, remittance_match_status: "unmatched" },
+    ];
+    const all = computeOverviewFromRows(rows);
+    expect(all.totalOrders).toBe(5);
+    expect(all.delivered).toBe(3);
+    expect(all.inTransit).toBe(1);
+    expect(all.rto).toBe(1);
+    const delhivery = computeOverviewFromRows(rows.filter((row) => row.courier_name === "Delhivery"));
+    expect(delhivery.totalOrders).toBe(4);
+    expect(delhivery.delivered).toBe(2);
+    expect(delhivery.inTransit).toBe(1);
+    expect(delhivery.rto).toBe(1);
+  });
+
+  it("does not multiply one order when scans and remittance exist", () => {
+    const overview = computeOverviewFromRows([
+      {
+        sr_order_id: "SR-1",
+        status_bucket: "delivered",
+        remittance_count: 2,
+        remittance_match_status: "matched",
+        latest_crf_id: "CRF-TEST-001",
+      },
+    ]);
+    expect(overview.totalOrders).toBe(1);
+    expect(overview.settledOrders).toBe(1);
+  });
+});
+
+describe("Webhook billing fields", () => {
+  it("extracts billing fields without using them as the Shopify customer fallback", () => {
+    const fields = extractWebhookFields({
+      billing_name: "Webhook Billing",
+      billing_email: "billing@example.test",
+      billing_phone: "9999999999",
+      customer_name: "Webhook Customer",
+      sr_order_id: "1000000001",
+    });
+    expect(fields.billing_name).toBe("Webhook Billing");
+    expect(fields.billing_email).toBe("billing@example.test");
+    expect(fields.customer_name).toBe("Webhook Customer");
   });
 });
 

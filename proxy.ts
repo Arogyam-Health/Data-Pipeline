@@ -13,7 +13,7 @@ function unauthorized(): NextResponse {
   return new NextResponse("Unauthorized", {
     status: 401,
     headers: {
-      "WWW-Authenticate": 'Basic realm="Shopify Dashboard"',
+      "WWW-Authenticate": 'Basic realm="Analytics Dashboard"',
     },
   });
 }
@@ -21,7 +21,14 @@ function unauthorized(): NextResponse {
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const needsDashboardAuth =
-    pathname.startsWith("/dashboard/shopify") || pathname.startsWith("/api/shopify");
+    pathname.startsWith("/dashboard/shopify") ||
+    pathname.startsWith("/api/shopify") ||
+    pathname.startsWith("/dashboard/meta") ||
+    pathname.startsWith("/api/meta") ||
+    pathname.startsWith("/dashboard/ga4") ||
+    pathname.startsWith("/api/ga4") ||
+    pathname.startsWith("/dashboard/shiprocket") ||
+    pathname.startsWith("/api/shiprocket");
 
   if (!needsDashboardAuth) {
     return NextResponse.next();
@@ -53,5 +60,18 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/dashboard/shopify", "/dashboard/shopify/:path*", "/api/shopify/:path*"],
+  matcher: [
+    "/dashboard/shopify",
+    "/dashboard/shopify/:path*",
+    "/api/shopify/:path*",
+    "/dashboard/meta",
+    "/dashboard/meta/:path*",
+    "/api/meta/:path*",
+    "/dashboard/ga4",
+    "/dashboard/ga4/:path*",
+    "/api/ga4/:path*",
+    "/dashboard/shiprocket",
+    "/dashboard/shiprocket/:path*",
+    "/api/shiprocket/:path*",
+  ],
 };

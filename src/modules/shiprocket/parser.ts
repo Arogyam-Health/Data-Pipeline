@@ -384,6 +384,62 @@ const UNIQUE_KEY_KEYS = ["Shiprocket Unique Key", "shiprocket_unique_key"];
  * Supports both payload.data and root-level formats.
  * Uses exact Apps Script field-name alternates.
  */
+function parseIsReturn(raw: string): boolean | null {
+  if (!raw || raw.trim() === "") return null;
+  const normalized = raw.trim().toLowerCase();
+  if (["true", "1", "yes"].includes(normalized)) return true;
+  if (["false", "0", "no"].includes(normalized)) return false;
+  return null;
+}
+
+function extractScan(scan: Record<string, unknown>): ShiprocketExtractedFields["scans"][number] {
+  return {
+    status: pickScan(scan, ["status"]),
+    sr_status_label: pickScan(scan, [
+      "sr-status-label",
+      "sr_status_label",
+      "srStatusLabel",
+      "status_label",
+    ]),
+    sr_status: pickScan(scan, ["sr-status", "sr_status", "srStatus", "status_code"]),
+    location: pickScan(scan, ["location", "scan_location", "current_location"]),
+    date: pickScan(scan, [
+      "date",
+      "scan_date",
+      "status_date",
+      "created_at",
+      "updated_at",
+    ]),
+    activity: pickScan(scan, ["activity", "description", "remarks", "message"]),
+    latitude: pickScan(scan, ["latitude", "lat"]),
+    longitude: pickScan(scan, ["longitude", "lng", "lon"]),
+  };
+}
+
+function getAllScans(data: Record<string, unknown>): ShiprocketExtractedFields["scans"] {
+  const scans =
+    data.scans ||
+    data.scan ||
+    data.activities ||
+    data.shipment_track_activities;
+
+  if (Array.isArray(scans)) {
+    return scans.map((item) =>
+      extractScan(
+        item && typeof item === "object"
+          ? (item as Record<string, unknown>)
+          : {}
+      )
+    );
+  }
+
+  if (scans && typeof scans === "object") {
+    return [extractScan(scans as Record<string, unknown>)];
+  }
+
+  return [];
+}
+
 export function extractWebhookFields(
   payload: ShiprocketWebhookPayload
 ): ShiprocketExtractedFields {
@@ -401,9 +457,10 @@ export function extractWebhookFields(
 
   const fullPayload = payload as Record<string, unknown>;
 
-  // Scans — port of getScan_ behavior
+  // Scans — port of getScan_ behavior for legacy columns; keep full history separately
   const scan0 = getScan(data, 0); // "Scans 0" — oldest / second most recent
   const scan1 = getScan(data, 1); // "Scans 1" — most recent
+  const allScans = getAllScans(data);
 
   // sr_order_id
   const srOrderId = pick(data, SR_ORDER_ID_KEYS);
@@ -448,9 +505,7 @@ export function extractWebhookFields(
     channel_id: pick(data, CHANNEL_ID_KEYS) || null,
     shipment_id: shipmentId || null,
     tracking_url: pick(data, TRACKING_URL_KEYS) || null,
-    is_return:
-      pick(data, IS_RETURN_KEYS) === "true" ||
-      pick(data, IS_RETURN_KEYS) === "True",
+    is_return: parseIsReturn(pick(data, IS_RETURN_KEYS)),
     etd: pick(data, ETD_KEYS) || null,
     order_date: pick(data, ORDER_DATE_KEYS) || null,
     created_at_sr: pick(data, CREATED_AT_KEYS) || null,
@@ -462,76 +517,42 @@ export function extractWebhookFields(
     tax: pick(data, TAX_KEYS) || null,
     products: stringifyIfObject(pickRaw(data, PRODUCTS_KEYS)) || null,
     delivered_date: deliveredDate || null,
-    scans: [
-      // scan0 = "Scans 0" (older)
-      {
-        status: pickScan(scan0, ["status"]),
-        sr_status_label: pickScan(scan0, [
-          "sr-status-label",
-          "sr_status_label",
-          "srStatusLabel",
-          "status_label",
-        ]),
-        sr_status: pickScan(scan0, [
-          "sr-status",
-          "sr_status",
-          "srStatus",
-          "status_code",
-        ]),
-        location: pickScan(scan0, [
-          "location",
-          "scan_location",
-          "current_location",
-        ]),
-        date: pickScan(scan0, [
-          "date",
-          "scan_date",
-          "status_date",
-          "created_at",
-          "updated_at",
-        ]),
-        activity: pickScan(scan0, [
-          "activity",
-          "description",
-          "remarks",
-          "message",
-        ]),
-      },
-      // scan1 = "Scans 1" (newer / most recent)
-      {
-        status: pickScan(scan1, ["status"]),
-        sr_status_label: pickScan(scan1, [
-          "sr-status-label",
-          "sr_status_label",
-          "srStatusLabel",
-          "status_label",
-        ]),
-        sr_status: pickScan(scan1, [
-          "sr-status",
-          "sr_status",
-          "srStatus",
-          "status_code",
-        ]),
-        location: pickScan(scan1, [
-          "location",
-          "scan_location",
-          "current_location",
-        ]),
-        date: pickScan(scan1, [
-          "date",
-          "scan_date",
-          "status_date",
-          "created_at",
-          "updated_at",
-        ]),
-        activity: pickScan(scan1, [
-          "activity",
-          "description",
-          "remarks",
-          "message",
-        ]),
-      },
-    ],
+    scans: [extractScan(scan0), extractScan(scan1)],
+    all_scans: allScans,
+
+    return_awb_code:
+      pick(data, ["return_awb_code", "returnAwbCode", "return_awb"]) || null,
+    awb_assigned_date:
+      pick(data, ["awb_assigned_date", "awbAssignedDate"]) || null,
+    pickup_scheduled_date:
+      pick(data, ["pickup_scheduled_date", "pickupScheduledDate"]) || null,
+    pickup_exception_reason:
+      pick(data, ["pickup_exception_reason", "pickupExceptionReason"]) || null,
+    undelivered_reason:
+      pick(data, ["undelivered_reason", "undeliveredReason"]) || null,
+    undelivered_reason_code:
+      pick(data, ["undelivered_reason_code", "undeliveredReasonCode"]) || null,
+    pick_exception_reason_code:
+      pick(data, [
+        "pick_exception_reason_code",
+        "pickup_exception_reason_code",
+        "pickExceptionReasonCode",
+      ]) || null,
+    delivery_attempt_count:
+      pick(data, ["delivery_attempt_count", "deliveryAttemptCount"]) || null,
+    pickup_attempt_count:
+      pick(data, ["pickup_attempt_count", "pickupAttemptCount"]) || null,
+    qc_image: pick(data, ["qc_image", "qcImage"]) || null,
+    qc_failure_reason:
+      pick(data, ["qc_failure_reason", "qcFailureReason"]) || null,
+    pod_status: pick(data, ["pod_status", "podStatus"]) || null,
+    pod: pick(data, ["pod"]) || null,
+    shipping_method:
+      pick(data, ["shipping_method", "shippingMethod"]) || null,
+    billing_name: pick(data, ["billing_name", "billingName"]) || null,
+    billing_email: pick(data, ["billing_email", "billingEmail"]) || null,
+    billing_phone: pick(data, ["billing_phone", "billingPhone"]) || null,
+    source_date: pick(data, ["date", "Date"]) || null,
 
     // Extra fields for Pabbly / tracking
     unique_key: firstNonEmpty(
@@ -605,5 +626,24 @@ export function toOrderRow(
     scan_location: latestScan?.location ?? null,
     scan_date: latestScan?.date ?? null,
     scan_activity: latestScan?.activity ?? null,
+    return_awb_code: fields.return_awb_code,
+    awb_assigned_date: fields.awb_assigned_date,
+    pickup_scheduled_date: fields.pickup_scheduled_date,
+    pickup_exception_reason: fields.pickup_exception_reason,
+    undelivered_reason: fields.undelivered_reason,
+    undelivered_reason_code: fields.undelivered_reason_code,
+    pick_exception_reason_code: fields.pick_exception_reason_code,
+    delivery_attempt_count: fields.delivery_attempt_count,
+    pickup_attempt_count: fields.pickup_attempt_count,
+    qc_image: fields.qc_image,
+    qc_failure_reason: fields.qc_failure_reason,
+    pod_status: fields.pod_status,
+    pod: fields.pod,
+    shipping_method: fields.shipping_method,
+    current_ts: fields.current_ts,
+    billing_name: fields.billing_name,
+    billing_email: fields.billing_email,
+    billing_phone: fields.billing_phone,
+    source_date: fields.source_date,
   };
 }

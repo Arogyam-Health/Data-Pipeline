@@ -14,10 +14,19 @@ export default function Home() {
             href="/dashboard"
             className="block p-6 bg-white rounded-lg shadow-lg hover:shadow-xl transition-shadow"
           >
-            <h2 className="text-xl font-semibold mb-2">📊 Shiprocket Dashboard</h2>
+            <h2 className="text-xl font-semibold mb-2">🏠 All sources</h2>
             <p className="text-gray-600">
-              View real-time analytics for Shiprocket orders, delivery status, and
-              Pabbly integration.
+              Global hub for Shiprocket, Shopify, Meta, and GA4.
+            </p>
+          </Link>
+
+          <Link
+            href="/dashboard/shiprocket"
+            className="block p-6 bg-white rounded-lg shadow-lg hover:shadow-xl transition-shadow"
+          >
+            <h2 className="text-xl font-semibold mb-2">🚚 Shiprocket</h2>
+            <p className="text-gray-600">
+              One operational dashboard: KPIs, filters, orders, scans, remittance, and data quality.
             </p>
           </Link>
 
@@ -28,6 +37,28 @@ export default function Home() {
             <h2 className="text-xl font-semibold mb-2">🛍️ Shopify Dashboard</h2>
             <p className="text-gray-600">
               View Shopify order, product, UTM, and sync-health analytics from
+              the isolated Supabase pipeline.
+            </p>
+          </Link>
+
+          <Link
+            href="/dashboard/meta"
+            className="block p-6 bg-white rounded-lg shadow-lg hover:shadow-xl transition-shadow"
+          >
+            <h2 className="text-xl font-semibold mb-2">📣 Meta Ads Dashboard</h2>
+            <p className="text-gray-600">
+              View Meta ad-level daily insights, funnel, video, and sync health
+              from the isolated Supabase pipeline.
+            </p>
+          </Link>
+
+          <Link
+            href="/dashboard/ga4"
+            className="block p-6 bg-white rounded-lg shadow-lg hover:shadow-xl transition-shadow"
+          >
+            <h2 className="text-xl font-semibold mb-2">📈 GA4 Dashboard</h2>
+            <p className="text-gray-600">
+              View GA4 daily, channel, and UTM analytics plus sync health from
               the isolated Supabase pipeline.
             </p>
           </Link>

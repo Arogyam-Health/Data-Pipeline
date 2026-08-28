@@ -4,6 +4,12 @@ import { getSupabaseClient } from "@/lib/supabase/admin";
 import { computeRequestHash } from "@/lib/integrations/hashing";
 import { getEnv } from "@/config/env";
 import { logger } from "@/lib/logger";
+import {
+  extractShiprocketWebhookSecret,
+  forwardRawWebhookToAppsScript,
+} from "@/modules/shiprocket/forward";
+
+export const maxDuration = 60;
 
 function safeCompare(a: string, b: string): boolean {
   const bufA = Buffer.from(a);
@@ -15,30 +21,19 @@ function safeCompare(a: string, b: string): boolean {
 /**
  * POST /api/webhooks/shiprocket
  *
- * Lightweight webhook receiver. Does only:
+ * Lightweight webhook receiver. Does:
  * 1. Authenticate webhook
  * 2. Read raw body
- * 3. Validate JSON
- * 4. Compute SHA-256 hash
- * 5. Store event + enqueue (atomic)
- * 6. Return 200 quickly
+ * 3. Forward the exact raw body to the existing Apps Script URL (if configured)
+ * 4. Ingest into Supabase / PGMQ
  *
- * Does NOT process orders synchronously.
+ * Apps Script / Sheet / production Pabbly stay intact when the forward URL is set.
+ * This app still does NOT send to production Pabbly unless SHIPROCKET_PABBLY_ENABLED=true.
  */
 export async function POST(request: NextRequest) {
   const env = getEnv();
-
-  // 1. Authenticate webhook
-  // Shiprocket may send auth via header or query param.
-  // Adjust header name based on your Shiprocket webhook config.
-  const authHeader = request.headers.get("authorization");
   const webhookSecret = env.SHIPROCKET_WEBHOOK_SECRET;
-
-  // Simple shared-secret authentication
-  // Compare against Authorization header or X-Webhook-Secret
-  const providedSecret =
-    authHeader?.replace("Bearer ", "") ??
-    request.headers.get("x-webhook-secret");
+  const providedSecret = extractShiprocketWebhookSecret(request);
 
   if (!providedSecret || !safeCompare(providedSecret, webhookSecret)) {
     logger.warn("Webhook authentication failed");
@@ -77,6 +72,27 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const appsScriptUrl = env.SHIPROCKET_APPS_SCRIPT_WEBHOOK_URL;
+  if (appsScriptUrl) {
+    const forwarded = await forwardRawWebhookToAppsScript({
+      url: appsScriptUrl,
+      rawBody,
+    });
+    if (!forwarded.ok) {
+      return NextResponse.json(
+        {
+          error: "Apps Script forward failed",
+          forwarded: false,
+        },
+        { status: 502 }
+      );
+    }
+  } else {
+    logger.warn(
+      "SHIPROCKET_APPS_SCRIPT_WEBHOOK_URL is not set; this request was not forwarded to Apps Script"
+    );
+  }
+
   // 4. Compute deterministic SHA-256 hash
   const requestHash = computeRequestHash(rawBody);
 
@@ -90,6 +106,7 @@ export async function POST(request: NextRequest) {
     if (
       lowerKey === "authorization" ||
       lowerKey === "x-webhook-secret" ||
+      lowerKey === "x-webhook-key" ||
       lowerKey === "cookie"
     ) {
       safeHeaders[key] = "[REDACTED]";

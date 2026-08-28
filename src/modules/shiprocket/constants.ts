@@ -1,5 +1,11 @@
 /** Field name constants for Shiprocket webhook extraction. */
 
+/** Legacy Sheet Coach formula: non-empty Order Id → this value. Change here only. */
+export const DEFAULT_COACH = "Misba";
+
+/** Exact 8-digit extraction used by the Sheet REGEXEXTRACT(..., "\\d{8}"). */
+export const SHOPIFY_ORDER_ID_REGEX = /\d{8}/;
+
 /** Top-level keys to look for the order data object. */
 export const DATA_KEYS = ["data", "order", "shipment", "root"] as const;
 

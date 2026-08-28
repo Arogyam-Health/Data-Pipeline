@@ -216,7 +216,13 @@ export default function ShopifyDashboard() {
             <p className="text-gray-600 mt-2">
               <Link href="/dashboard">Shiprocket</Link>
               {" · "}
+              <Link href="/dashboard/shiprocket">Explorer</Link>
+              {" · "}
               <strong>Shopify</strong>
+              {" · "}
+              <Link href="/dashboard/meta">Meta</Link>
+              {" · "}
+              <Link href="/dashboard/ga4">GA4</Link>
             </p>
           </div>
           <div className="flex items-center gap-4">

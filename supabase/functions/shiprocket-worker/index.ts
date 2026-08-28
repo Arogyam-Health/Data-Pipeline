@@ -160,9 +160,16 @@ async function processEvent(
       throw new Error("No sr_order_id found in webhook payload");
     }
 
-    // Upsert order
-    const scan0 = fields.scans[0] ?? null; // "Scans 0" (older)
-    const scan1 = fields.scans[1] ?? null; // "Scans 1" (newer)
+    const { data: existing } = await supabase
+      .from("shiprocket_orders")
+      .select("*")
+      .eq("sr_order_id", fields.sr_order_id)
+      .maybeSingle();
+
+    const stale = isStaleWebhookTs(fields.current_ts, existing?.current_ts);
+    const scan0 = stale ? null : fields.scans[0] ?? null;
+    const scan1 = stale ? null : fields.scans[1] ?? null;
+    const merged = mergeSparseOrder(existing as Record<string, unknown> | null, fields, stale);
 
     const { error: upsertError } = await supabase
       
@@ -170,46 +177,65 @@ async function processEvent(
       .upsert(
         {
           sr_order_id: fields.sr_order_id,
-          unique_key: fields.unique_key,
-          shipment_status_id: fields.shipment_status_id,
-          shipment_status: fields.shipment_status,
-          current_status_id: fields.current_status_id,
-          current_status: fields.current_status,
-          current_ts: fields.current_ts,
-          order_status: fields.order_status,
-          order_status_code: fields.order_status_code,
-          payment_status: fields.payment_status,
-          payment_method: fields.payment_method,
-          courier_name: fields.courier_name,
-          awb: fields.awb,
-          channel_id: fields.channel_id,
-          shipment_id: fields.shipment_id,
-          tracking_url: fields.tracking_url,
-          is_return: fields.is_return,
-          etd: fields.etd,
-          order_date: fields.order_date,
-          created_at_sr: fields.created_at_sr,
-          customer_name: fields.customer_name,
-          customer_email: fields.customer_email,
-          customer_phone: fields.customer_phone,
-          pickup_location: fields.pickup_location,
-          order_total: fields.order_total,
-          tax: fields.tax,
-          products: fields.products,
-          delivered_date: fields.delivered_date,
-          scans1_status: scan1?.status ?? null,
-          scans1_sr_status_label: scan1?.sr_status_label ?? null,
-          scans1_sr_status: scan1?.sr_status ?? null,
-          scans1_location: scan1?.location ?? null,
-          scans1_date: scan1?.date ?? null,
-          scans1_activity: scan1?.activity ?? null,
-          scans0_status: scan0?.status ?? null,
-          scans0_sr_status_label: scan0?.sr_status_label ?? null,
-          scans0_sr_status: scan0?.sr_status ?? null,
-          scans0_location: scan0?.location ?? null,
-          scans0_date: scan0?.date ?? null,
-          scans0_activity: scan0?.activity ?? null,
-          raw_payload: payload,
+          unique_key: keepText(existing?.unique_key, fields.unique_key),
+          shipment_status_id: merged.shipment_status_id,
+          shipment_status: merged.shipment_status,
+          current_status_id: merged.current_status_id,
+          current_status: merged.current_status,
+          current_ts: merged.current_ts,
+          order_status: merged.order_status,
+          order_status_code: merged.order_status_code,
+          payment_status: merged.payment_status,
+          payment_method: merged.payment_method,
+          courier_name: merged.courier_name,
+          awb: merged.awb,
+          channel_id: merged.channel_id,
+          shipment_id: merged.shipment_id,
+          tracking_url: merged.tracking_url,
+          is_return: merged.is_return,
+          etd: merged.etd,
+          order_date: merged.order_date,
+          created_at_sr: merged.created_at_sr,
+          customer_name: merged.customer_name,
+          customer_email: merged.customer_email,
+          customer_phone: merged.customer_phone,
+          pickup_location: merged.pickup_location,
+          order_total: merged.order_total,
+          tax: merged.tax,
+          products: merged.products,
+          delivered_date: merged.delivered_date,
+          return_awb_code: merged.return_awb_code,
+          awb_assigned_date: merged.awb_assigned_date,
+          pickup_scheduled_date: merged.pickup_scheduled_date,
+          pickup_exception_reason: merged.pickup_exception_reason,
+          undelivered_reason: merged.undelivered_reason,
+          undelivered_reason_code: merged.undelivered_reason_code,
+          pick_exception_reason_code: merged.pick_exception_reason_code,
+          delivery_attempt_count: merged.delivery_attempt_count,
+          pickup_attempt_count: merged.pickup_attempt_count,
+          qc_image: merged.qc_image,
+          qc_failure_reason: merged.qc_failure_reason,
+          pod_status: merged.pod_status,
+          pod: merged.pod,
+          shipping_method: merged.shipping_method,
+          billing_name: merged.billing_name,
+          billing_email: merged.billing_email,
+          billing_phone: merged.billing_phone,
+          source_date: merged.source_date,
+          last_local_api_sync_at: existing?.last_local_api_sync_at ?? null,
+          scans1_status: stale ? existing?.scans1_status ?? null : keepText(existing?.scans1_status, scan1?.status),
+          scans1_sr_status_label: stale ? existing?.scans1_sr_status_label ?? null : keepText(existing?.scans1_sr_status_label, scan1?.sr_status_label),
+          scans1_sr_status: stale ? existing?.scans1_sr_status ?? null : keepText(existing?.scans1_sr_status, scan1?.sr_status),
+          scans1_location: stale ? existing?.scans1_location ?? null : keepText(existing?.scans1_location, scan1?.location),
+          scans1_date: stale ? existing?.scans1_date ?? null : keepText(existing?.scans1_date, scan1?.date),
+          scans1_activity: stale ? existing?.scans1_activity ?? null : keepText(existing?.scans1_activity, scan1?.activity),
+          scans0_status: stale ? existing?.scans0_status ?? null : keepText(existing?.scans0_status, scan0?.status),
+          scans0_sr_status_label: stale ? existing?.scans0_sr_status_label ?? null : keepText(existing?.scans0_sr_status_label, scan0?.sr_status_label),
+          scans0_sr_status: stale ? existing?.scans0_sr_status ?? null : keepText(existing?.scans0_sr_status, scan0?.sr_status),
+          scans0_location: stale ? existing?.scans0_location ?? null : keepText(existing?.scans0_location, scan0?.location),
+          scans0_date: stale ? existing?.scans0_date ?? null : keepText(existing?.scans0_date, scan0?.date),
+          scans0_activity: stale ? existing?.scans0_activity ?? null : keepText(existing?.scans0_activity, scan0?.activity),
+          raw_payload: stale && existing?.raw_payload ? existing.raw_payload : payload,
           integration_event_id: eventId,
           last_webhook_sync_at: new Date().toISOString(),
         },
@@ -220,13 +246,44 @@ async function processEvent(
       throw new Error(`Upsert failed: ${upsertError.message}`);
     }
 
+    if (!stale && fields.all_scans.length > 0) {
+      await supabase.from("shiprocket_scans").delete().eq("sr_order_id", fields.sr_order_id);
+      await supabase.from("shiprocket_scans").insert(
+        fields.all_scans.map((scan, index) => ({
+          sr_order_id: fields.sr_order_id,
+          awb: fields.awb,
+          scan_index: index,
+          scan_date: scan.date || null,
+          status: scan.status || null,
+          sr_status: scan.sr_status || null,
+          sr_status_label: scan.sr_status_label || null,
+          activity: scan.activity || null,
+          location: scan.location || null,
+          latitude: scan.latitude || null,
+          longitude: scan.longitude || null,
+        }))
+      );
+    }
+
+    try {
+      await supabase.rpc("enrich_shiprocket_order", {
+        p_sr_order_id: fields.sr_order_id,
+      });
+    } catch (enrichErr) {
+      logger.warn("Shopify enrichment failed after order upsert", {
+        event_id: eventId,
+        sr_order_id: fields.sr_order_id,
+        error: enrichErr instanceof Error ? enrichErr.message : String(enrichErr),
+      });
+    }
+
     logger.info("Order upserted", {
       event_id: eventId,
       sr_order_id: fields.sr_order_id,
       queue_msg_id: msgId,
     });
 
-    // Send to Pabbly
+    // Send to Pabbly only when explicitly enabled (default false during parallel validation)
     const pabblyUrl = Deno.env.get("PABBLY_SHIPROCKET_URL");
     const pabblyEnabled =
       Deno.env.get("SHIPROCKET_PABBLY_ENABLED") === "true";
@@ -337,17 +394,14 @@ async function sendToPabbly(
 
   if (!delivery) return;
 
-  // Read full order row for Pabbly (mirrors Apps Script sheet row read)
   const { data: orderRow } = await supabase
-    
-    .from("shiprocket_orders")
+    .from("shiprocket_order_explorer")
     .select("*")
     .eq("sr_order_id", srOrderKey)
     .single();
 
   if (!orderRow) return;
 
-  // Build Pabbly payload matching Apps Script column headers
   const pabblyPayload: Record<string, unknown> = {
     "Shiprocket Unique Key": orderRow.unique_key ?? "",
     "Sr Order Id": orderRow.sr_order_id ?? "",
@@ -376,9 +430,9 @@ async function sendToPabbly(
     Awb: orderRow.awb ?? "",
     "Order Date": orderRow.order_date ?? "",
     "Created At": orderRow.created_at_sr ?? "",
-    "Customer Name": orderRow.customer_name ?? "",
+    "Customer Name": orderRow.customer_name_shopify ?? "",
     "Customer Email": orderRow.customer_email ?? "",
-    "Customer Phone": orderRow.customer_phone ?? "",
+    "Customer Phone": orderRow.customer_phone_shopify ?? "",
     "Pickup Location": orderRow.pickup_location ?? "",
     "Payment Status": orderRow.payment_status ?? "",
     "Payment Method": orderRow.payment_method ?? "",
@@ -390,14 +444,19 @@ async function sendToPabbly(
     "Tracking URL": orderRow.tracking_url ?? "",
     "Delivered Date": orderRow.delivered_date ?? "",
     Products: orderRow.products ?? "",
-    "Last Local API Sync At": "",
+    "Last Local API Sync At": orderRow.last_local_api_sync_at ?? "",
     "Last Webhook Sync At": orderRow.last_webhook_sync_at ?? "",
+    Coach: orderRow.coach ?? "",
+    "order id shopify format": orderRow.order_id_shopify_format ?? "",
     "Sheet Action": "created_new_row",
     "Sheet Row Number": "",
     "Sheet Error": "",
     "Webhook Event Id": eventId,
     "Pabbly Idempotency Key": eventId,
   };
+  for (let i = 47; i <= 67; i++) {
+    pabblyPayload[`Column ${i}`] = "";
+  }
 
   try {
     const response = await fetch(pabblyUrl, {
@@ -459,6 +518,8 @@ interface ShiprocketScan {
   location: string | null;
   date: string | null;
   activity: string | null;
+  latitude: string | null;
+  longitude: string | null;
 }
 
 interface ExtractedFields {
@@ -477,7 +538,7 @@ interface ExtractedFields {
   channel_id: string | null;
   shipment_id: string | null;
   tracking_url: string | null;
-  is_return: boolean;
+  is_return: boolean | null;
   etd: string | null;
   order_date: string | null;
   created_at_sr: string | null;
@@ -492,6 +553,25 @@ interface ExtractedFields {
   current_ts: string | null;
   unique_key: string | null;
   scans: ShiprocketScan[];
+  all_scans: ShiprocketScan[];
+  return_awb_code: string | null;
+  awb_assigned_date: string | null;
+  pickup_scheduled_date: string | null;
+  pickup_exception_reason: string | null;
+  undelivered_reason: string | null;
+  undelivered_reason_code: string | null;
+  pick_exception_reason_code: string | null;
+  delivery_attempt_count: string | null;
+  pickup_attempt_count: string | null;
+  qc_image: string | null;
+  qc_failure_reason: string | null;
+  pod_status: string | null;
+  pod: string | null;
+  shipping_method: string | null;
+  billing_name: string | null;
+  billing_email: string | null;
+  billing_phone: string | null;
+  source_date: string | null;
 }
 
 function normalizeKey(value: string): string {
@@ -636,7 +716,7 @@ function extractShiprocketFields(payload: Record<string, unknown>): ExtractedFie
     channel_id: pickStr(data, ["Channel Id", "channel_id", "channelId", "channel"]) || null,
     shipment_id: shipmentId || null,
     tracking_url: pickStr(data, ["Tracking URL", "tracking_url", "track_url", "tracking_link"]) || null,
-    is_return: pickStr(data, ["Is Return", "is_return", "isReturn", "return_order", "is_reverse"]) === "true" || pickStr(data, ["Is Return", "is_return", "isReturn", "return_order", "is_reverse"]) === "True",
+    is_return: parseIsReturnWorker(pickStr(data, ["Is Return", "is_return", "isReturn", "return_order", "is_reverse"])),
     etd: pickStr(data, ["Etd", "etd", "edd", "expected_delivery_date"]) || null,
     order_date: pickStr(data, ["Order Date", "order_date", "channel_created_at", "created_at"]) || null,
     created_at_sr: pickStr(data, ["Created At", "created_at", "created_on"]) || null,
@@ -651,8 +731,106 @@ function extractShiprocketFields(payload: Record<string, unknown>): ExtractedFie
     current_ts: currentTimestamp || null,
     unique_key: firstNonEmpty(pickStr(data, ["Shiprocket Unique Key", "shiprocket_unique_key"]), srOrderId ? `shiprocket_order:${srOrderId}` : "") || null,
     scans: [
-      { status: pickScanField(scan0, ["status"]), sr_status_label: pickScanField(scan0, ["sr-status-label", "sr_status_label", "srStatusLabel", "status_label"]), sr_status: pickScanField(scan0, ["sr-status", "sr_status", "srStatus", "status_code"]), location: pickScanField(scan0, ["location", "scan_location", "current_location"]), date: pickScanField(scan0, ["date", "scan_date", "status_date", "created_at", "updated_at"]), activity: pickScanField(scan0, ["activity", "description", "remarks", "message"]) },
-      { status: pickScanField(scan1, ["status"]), sr_status_label: pickScanField(scan1, ["sr-status-label", "sr_status_label", "srStatusLabel", "status_label"]), sr_status: pickScanField(scan1, ["sr-status", "sr_status", "srStatus", "status_code"]), location: pickScanField(scan1, ["location", "scan_location", "current_location"]), date: pickScanField(scan1, ["date", "scan_date", "status_date", "created_at", "updated_at"]), activity: pickScanField(scan1, ["activity", "description", "remarks", "message"]) },
+      extractWorkerScan(scan0),
+      extractWorkerScan(scan1),
     ],
+    all_scans: getAllWorkerScans(data),
+    return_awb_code: pickStr(data, ["return_awb_code", "returnAwbCode", "return_awb"]) || null,
+    awb_assigned_date: pickStr(data, ["awb_assigned_date", "awbAssignedDate"]) || null,
+    pickup_scheduled_date: pickStr(data, ["pickup_scheduled_date", "pickupScheduledDate"]) || null,
+    pickup_exception_reason: pickStr(data, ["pickup_exception_reason", "pickupExceptionReason"]) || null,
+    undelivered_reason: pickStr(data, ["undelivered_reason", "undeliveredReason"]) || null,
+    undelivered_reason_code: pickStr(data, ["undelivered_reason_code", "undeliveredReasonCode"]) || null,
+    pick_exception_reason_code: pickStr(data, ["pick_exception_reason_code", "pickup_exception_reason_code", "pickExceptionReasonCode"]) || null,
+    delivery_attempt_count: pickStr(data, ["delivery_attempt_count", "deliveryAttemptCount"]) || null,
+    pickup_attempt_count: pickStr(data, ["pickup_attempt_count", "pickupAttemptCount"]) || null,
+    qc_image: pickStr(data, ["qc_image", "qcImage"]) || null,
+    qc_failure_reason: pickStr(data, ["qc_failure_reason", "qcFailureReason"]) || null,
+    pod_status: pickStr(data, ["pod_status", "podStatus"]) || null,
+    pod: pickStr(data, ["pod"]) || null,
+    shipping_method: pickStr(data, ["shipping_method", "shippingMethod"]) || null,
+    billing_name: pickStr(data, ["billing_name", "billingName"]) || null,
+    billing_email: pickStr(data, ["billing_email", "billingEmail"]) || null,
+    billing_phone: pickStr(data, ["billing_phone", "billingPhone"]) || null,
+    source_date: pickStr(data, ["date", "Date"]) || null,
   };
+}
+
+function parseIsReturnWorker(raw: string): boolean | null {
+  if (!raw || raw.trim() === "") return null;
+  const normalized = raw.trim().toLowerCase();
+  if (["true", "1", "yes"].includes(normalized)) return true;
+  if (["false", "0", "no"].includes(normalized)) return false;
+  return null;
+}
+
+function extractWorkerScan(scan: Record<string, unknown>): ShiprocketScan {
+  return {
+    status: pickScanField(scan, ["status"]),
+    sr_status_label: pickScanField(scan, ["sr-status-label", "sr_status_label", "srStatusLabel", "status_label"]),
+    sr_status: pickScanField(scan, ["sr-status", "sr_status", "srStatus", "status_code"]),
+    location: pickScanField(scan, ["location", "scan_location", "current_location"]),
+    date: pickScanField(scan, ["date", "scan_date", "status_date", "created_at", "updated_at"]),
+    activity: pickScanField(scan, ["activity", "description", "remarks", "message"]),
+    latitude: pickScanField(scan, ["latitude", "lat"]),
+    longitude: pickScanField(scan, ["longitude", "lng", "lon"]),
+  };
+}
+
+function getAllWorkerScans(data: Record<string, unknown>): ShiprocketScan[] {
+  const scans = data.scans || data.scan || data.activities || data.shipment_track_activities;
+  if (Array.isArray(scans)) {
+    return scans.map((item) => extractWorkerScan(item && typeof item === "object" ? item as Record<string, unknown> : {}));
+  }
+  if (scans && typeof scans === "object") {
+    return [extractWorkerScan(scans as Record<string, unknown>)];
+  }
+  return [];
+}
+
+function keepText(existing: unknown, incoming: unknown): unknown {
+  if (incoming === undefined || incoming === null || String(incoming).trim() === "") return existing ?? incoming;
+  return incoming;
+}
+
+function isStaleWebhookTs(incoming: unknown, existing: unknown): boolean {
+  if (!incoming || !existing) return false;
+  const a = Date.parse(String(incoming));
+  const b = Date.parse(String(existing));
+  if (Number.isNaN(a) || Number.isNaN(b)) return false;
+  return a < b;
+}
+
+function mergeSparseOrder(
+  existing: Record<string, unknown> | null,
+  incoming: ExtractedFields,
+  stale: boolean
+): Record<string, unknown> {
+  const row: Record<string, unknown> = { ...(existing || {}), ...incoming };
+  const keys = [
+    "shipment_status_id", "shipment_status", "current_status_id", "current_status", "current_ts",
+    "order_status", "order_status_code", "payment_status", "payment_method", "courier_name", "awb",
+    "channel_id", "shipment_id", "tracking_url", "etd", "order_date", "created_at_sr", "customer_name",
+    "customer_email", "customer_phone", "pickup_location", "order_total", "tax", "products", "delivered_date",
+    "return_awb_code", "awb_assigned_date", "pickup_scheduled_date", "pickup_exception_reason",
+    "undelivered_reason", "undelivered_reason_code", "pick_exception_reason_code", "delivery_attempt_count",
+    "pickup_attempt_count", "qc_image", "qc_failure_reason", "pod_status", "pod", "shipping_method",
+    "billing_name", "billing_email", "billing_phone", "source_date",
+  ];
+  for (const key of keys) {
+    row[key] = keepText(existing?.[key], incoming[key as keyof ExtractedFields]);
+  }
+  if (incoming.is_return === null || incoming.is_return === undefined) {
+    row.is_return = existing?.is_return ?? false;
+  } else {
+    row.is_return = incoming.is_return;
+  }
+  if (stale && existing) {
+    row.current_status = existing.current_status;
+    row.current_status_id = existing.current_status_id;
+    row.current_ts = existing.current_ts;
+    row.shipment_status = existing.shipment_status;
+    row.shipment_status_id = existing.shipment_status_id;
+  }
+  return row;
 }
