@@ -583,6 +583,16 @@ describe("Apps Script fan-out", () => {
     expect(secret).toBe("test-webhook-secret");
   });
 
+  it("reads a raw Authorization token from the Shiprocket dashboard", () => {
+    const secret = extractShiprocketWebhookSecret({
+      headers: {
+        get: (name: string) =>
+          name.toLowerCase() === "authorization" ? "dashboard-token" : null,
+      },
+    });
+    expect(secret).toBe("dashboard-token");
+  });
+
   it("reads the webhook secret from query hook_key when headers are absent", () => {
     const url = new URL("https://example.test/api/webhooks/shiprocket?hook_key=test-webhook-secret");
     const secret = extractShiprocketWebhookSecret({

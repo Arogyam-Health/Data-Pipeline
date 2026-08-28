@@ -7,16 +7,28 @@ export function isSuccessfulAppsScriptForward(status: number): boolean {
   return (status >= 200 && status < 300) || status === 302 || status === 303;
 }
 
+function cleanSecret(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const text = value.trim();
+  return text || null;
+}
+
+function fromAuthorizationHeader(value: string | null): string | null {
+  const text = cleanSecret(value);
+  if (!text) return null;
+  return cleanSecret(text.replace(/^(Bearer|Token)\s+/i, ""));
+}
+
 export function extractShiprocketWebhookSecret(request: {
   headers: { get(name: string): string | null };
   nextUrl?: { searchParams: URLSearchParams };
   url?: string;
 }): string | null {
   const header =
-    request.headers.get("x-api-key") ??
-    request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ??
-    request.headers.get("x-webhook-secret") ??
-    request.headers.get("x-webhook-key");
+    cleanSecret(request.headers.get("x-api-key")) ??
+    fromAuthorizationHeader(request.headers.get("authorization")) ??
+    cleanSecret(request.headers.get("x-webhook-secret")) ??
+    cleanSecret(request.headers.get("x-webhook-key"));
   if (header) return header;
 
   const params =
@@ -24,9 +36,9 @@ export function extractShiprocketWebhookSecret(request: {
     (request.url ? new URL(request.url).searchParams : null);
   if (!params) return null;
   return (
-    params.get("hook_key") ||
-    params.get("token") ||
-    params.get("secret") ||
+    cleanSecret(params.get("hook_key")) ||
+    cleanSecret(params.get("token")) ||
+    cleanSecret(params.get("secret")) ||
     null
   );
 }

@@ -12,10 +12,21 @@ import {
 export const maxDuration = 60;
 
 function safeCompare(a: string, b: string): boolean {
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
+  const left = a.trim();
+  const right = b.trim();
+  const bufA = Buffer.from(left);
+  const bufB = Buffer.from(right);
   if (bufA.length !== bufB.length) return false;
   return timingSafeEqual(bufA, bufB);
+}
+
+/** Shiprocket URL checks often use GET/HEAD. Auth is not required for reachability. */
+export async function GET() {
+  return NextResponse.json({ ok: true, service: "shiprocket-webhook" }, { status: 200 });
+}
+
+export async function HEAD() {
+  return new NextResponse(null, { status: 200 });
 }
 
 /**
@@ -56,8 +67,8 @@ export async function POST(request: NextRequest) {
 
   if (!rawBody || rawBody.trim().length === 0) {
     return NextResponse.json(
-      { error: "Empty request body" },
-      { status: 400 }
+      { received: true, probe: true },
+      { status: 200 }
     );
   }
 
