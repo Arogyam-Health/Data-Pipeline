@@ -699,6 +699,7 @@ describe("Shopify API guards", () => {
     expect(authorizeInternalSync(null)).toBe(false);
     expect(authorizeInternalSync("Bearer wrong-secret")).toBe(false);
     expect(authorizeInternalSync("Bearer test-shopify-sync-secret")).toBe(true);
+    expect(authorizeInternalSync("Bearer test-cron-secret")).toBe(true);
   });
 
   it("refuses incremental sync when SHOPIFY_SYNC_ENABLED is false", async () => {

@@ -9,9 +9,13 @@ export function safeCompare(a: string, b: string): boolean {
 }
 
 export function authorizeInternalSync(header: string | null): boolean {
-  const secret = getShopifyEnv().SHOPIFY_INTERNAL_SYNC_SECRET;
   if (!header || !header.startsWith("Bearer ")) return false;
-  return safeCompare(header.slice("Bearer ".length), secret);
+  const provided = header.slice("Bearer ".length);
+  const shopifySecret = getShopifyEnv().SHOPIFY_INTERNAL_SYNC_SECRET;
+  if (safeCompare(provided, shopifySecret)) return true;
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret && safeCompare(provided, cronSecret)) return true;
+  return false;
 }
 
 export function authorizeDashboard(header: string | null): boolean {

@@ -76,8 +76,13 @@ npm run dev
 Cloud scheduler (after the app has a public URL):
 
 ```
+Vercel Cron  7,22,37,52 * * * *
+  → GET /api/internal/shopify/sync
+     Authorization: Bearer $CRON_SECRET
+
+# Hobby fallback (or extra reliability):
 Supabase pg_cron  7,22,37,52 * * * *
-  → POST <PUBLIC_APP_URL>/api/internal/shopify/sync
+  → POST https://<vercel-app>/api/internal/shopify/sync
 ```
 
 ---
@@ -326,7 +331,8 @@ Authorization: Bearer <SHOPIFY_INTERNAL_SYNC_SECRET>
 
 1. **Localhost:** Supabase cron cannot reach `http://localhost:3000`. The Next.js process polls itself when `SHOPIFY_SYNC_ENABLED=true`.
 2. Stop `npm run dev` → polling stops. Start it again → catch-up runs automatically.
-3. **Deployed public URL:** create the offset cron below in the SQL Editor. Never put the filled URL/secret in a migration or git.
+3. **Vercel:** `vercel.json` schedules `GET /api/internal/shopify/sync` at `:07/:22/:37/:52`. Vercel sends `Authorization: Bearer $CRON_SECRET`. Set `CRON_SECRET` to the same value as `SHOPIFY_INTERNAL_SYNC_SECRET`, and set `SHOPIFY_SYNC_ENABLED=true`. Hobby plans only allow one cron per day — use Pro, or the Supabase cron below.
+4. **Supabase fallback** (any Vercel plan): create the offset cron in the SQL Editor. Never put the filled URL/secret in a migration or git.
 
 ```sql
 SELECT cron.schedule(
@@ -514,7 +520,7 @@ curl -X POST http://localhost:3000/api/internal/ga4/sync/test \
 2. Run this pipeline in parallel.
 3. Compare sheet vs `data_pipeline.shopify_orders` (see `SHOPIFY_VALIDATION.md`).
 4. Do not switch production traffic until explicitly approved.
-5. After a public deploy, add the Shopify pg_cron job with placeholders filled **only** in the SQL Editor.
+5. After a public deploy, set `SHOPIFY_SYNC_ENABLED=true` and `CRON_SECRET` (same as `SHOPIFY_INTERNAL_SYNC_SECRET`) on Vercel so `vercel.json` can pull Shopify. On Hobby, use the SQL Editor pg_cron job instead — never commit the filled URL/secret.
 
 ---
 

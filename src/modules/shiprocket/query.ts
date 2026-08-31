@@ -28,6 +28,12 @@ const OVERVIEW_COLUMNS = [
   "latest_order_settlement_value",
   "shopify_order_identifier",
   "customer_phone_shopify",
+  "pabbly_status",
+  "pabbly_attempt_count",
+  "pabbly_sent_at",
+  "pabbly_delivery_count",
+  "pabbly_sent_count",
+  "pabbly_failed_count",
 ].join(",");
 
 type FilterBuilder = {

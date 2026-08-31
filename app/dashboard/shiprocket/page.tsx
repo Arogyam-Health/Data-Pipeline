@@ -44,6 +44,11 @@ interface Overview {
   distinctUtrs: number;
   shopifyMatchPct: number;
   phoneCoveragePct: number;
+  pabblySent?: number;
+  pabblyFailed?: number;
+  pabblyPending?: number;
+  pabblyRetrying?: number;
+  pabblyTotalDeliveries?: number;
 }
 
 interface AppliedFilter {
@@ -55,20 +60,22 @@ interface AppliedFilter {
 const DEFAULT_COLUMNS = [
   "sr_order_id",
   "order_id",
+  "order_id_shopify_format",
   "awb",
-  "return_awb_code",
   "shipment_status",
   "current_status",
   "courier_name",
+  "customer_name_shopify",
+  "customer_phone_shopify",
+  "coach",
   "etd",
   "undelivered_reason",
-  "delivery_attempt_count",
-  "awb_assigned_date",
-  "pod_status",
-  "shipping_method",
-  "customer_name_shopify",
+  "return_awb_code",
   "payment_method",
   "order_total",
+  "pabbly_status",
+  "pabbly_attempt_count",
+  "pabbly_sent_at",
   "latest_crf_id",
   "latest_utr",
 ];
@@ -82,9 +89,10 @@ const MONO_COLUMNS = new Set([
   "latest_utr",
   "shipment_id",
   "return_awb_code",
+  "pabbly_sent_at",
 ]);
 
-const COLUMN_STORAGE_KEY = "shiprocket-visible-columns-v2";
+const COLUMN_STORAGE_KEY = "shiprocket-visible-columns-v3";
 
 const SHORTCUTS: Array<{ label: string; filters: AppliedFilter[] }> = [
   { label: "7 days", filters: [{ field: "last_webhook_sync_at", operator: "last_7_days" }] },
@@ -96,6 +104,9 @@ const SHORTCUTS: Array<{ label: string; filters: AppliedFilter[] }> = [
   { label: "COD", filters: [{ field: "payment_bucket", operator: "eq", value: "COD" }] },
   { label: "Shopify Matched", filters: [{ field: "shopify_matched", operator: "true" }] },
   { label: "No Remittance", filters: [{ field: "remittance_match_status", operator: "eq", value: "unmatched" }] },
+  { label: "Pabbly Sent", filters: [{ field: "pabbly_status", operator: "eq", value: "sent" }] },
+  { label: "Pabbly Failed", filters: [{ field: "pabbly_status", operator: "eq", value: "failed" }] },
+  { label: "Pabbly Pending", filters: [{ field: "pabbly_status", operator: "in", value: ["pending", "retrying", "processing"] }] },
 ];
 
 function dash(value: unknown): string {
@@ -136,15 +147,31 @@ function statusBadgeClass(value: unknown): string {
   return "sr-status-badge sr-status-default";
 }
 
+function pabblyBadgeClass(value: unknown): string {
+  const text = String(value ?? "").toLowerCase();
+  if (text === "sent") return "sr-pabbly-badge sr-pabbly-sent";
+  if (text === "failed") return "sr-pabbly-badge sr-pabbly-failed";
+  if (text === "pending") return "sr-pabbly-badge sr-pabbly-pending";
+  if (text === "retrying") return "sr-pabbly-badge sr-pabbly-retrying";
+  if (text === "processing") return "sr-pabbly-badge sr-pabbly-processing";
+  return "sr-pabbly-badge sr-pabbly-none";
+}
+
 function renderCell(col: string, value: unknown): ReactNode {
   if (value == null || value === "") {
     return <span className="sr-muted">—</span>;
+  }
+  if (col === "pabbly_status") {
+    return <span className={pabblyBadgeClass(value)}>{String(value)}</span>;
   }
   if (col.includes("status") || col === "status_bucket") {
     return <span className={statusBadgeClass(value)}>{String(value)}</span>;
   }
   if (col === "order_total" || col.includes("settlement") || col.includes("amount")) {
     return money(value);
+  }
+  if (col === "pabbly_sent_at" && value) {
+    return <span className="sr-mono">{new Date(String(value)).toLocaleString("en-IN")}</span>;
   }
   if (MONO_COLUMNS.has(col)) {
     return <span className="sr-mono">{String(value)}</span>;
@@ -445,6 +472,16 @@ export default function ShiprocketDashboardPage() {
             { label: "Phone Coverage", value: `${overview.phoneCoveragePct}%` },
           ],
         },
+        {
+          title: "Pabbly",
+          cards: [
+            { label: "Pabbly Sent", value: overview.pabblySent ?? 0 },
+            { label: "Pabbly Failed", value: overview.pabblyFailed ?? 0 },
+            { label: "Pabbly Pending", value: overview.pabblyPending ?? 0 },
+            { label: "Pabbly Retrying", value: overview.pabblyRetrying ?? 0 },
+            { label: "Pabbly Success Rate", value: overview.pabblyTotalDeliveries ? `${Math.round(((overview.pabblySent ?? 0) / overview.pabblyTotalDeliveries) * 100)}%` : "—" },
+          ],
+        },
       ]
     : [];
 
@@ -489,8 +526,8 @@ export default function ShiprocketDashboardPage() {
               <Link href="/dashboard/ga4">GA4</Link>
             </nav>
             <div className="sr-status-row">
-              <span className="sr-badge-pill">Parallel validation</span>
-              <span className="sr-status-note">Legacy Apps Script + Sheet + Pabbly remain live. New Pabbly remains off.</span>
+              <span className="sr-badge-pill">Pabbly test</span>
+              <span className="sr-status-note">Pabbly dispatch enabled. Apps Script Sheet + Pabbly URL temporarily disabled.</span>
             </div>
           </div>
           <div className="sr-header-actions">
@@ -1059,6 +1096,19 @@ export default function ShiprocketDashboardPage() {
                     <DrawerField label="Last webhook" value={detail.order?.last_webhook_sync_at} />
                     <DrawerField label="Last API" value={detail.order?.last_local_api_sync_at} />
                     <DrawerField label="Shopify enriched" value={detail.order?.last_enriched_at} />
+                  </DrawerSection>
+                  <DrawerSection title="Pabbly Delivery">
+                    <DrawerField label="Pabbly Status" value={detail.order?.pabbly_status} />
+                    <DrawerField label="Attempt Count" value={detail.order?.pabbly_attempt_count} />
+                    <DrawerField label="First Attempt" value={detail.order?.pabbly_first_attempt_at} />
+                    <DrawerField label="Last Attempt" value={detail.order?.pabbly_last_attempt_at} />
+                    <DrawerField label="Sent At" value={detail.order?.pabbly_sent_at} />
+                    <DrawerField label="Delivery Count" value={detail.order?.pabbly_delivery_count} />
+                    <DrawerField label="Sent Count" value={detail.order?.pabbly_sent_count} />
+                    <DrawerField label="Failed Count" value={detail.order?.pabbly_failed_count} />
+                    <DrawerField label="Last Error" value={detail.order?.pabbly_last_error} />
+                    <DrawerField label="Next Attempt" value={detail.order?.pabbly_next_attempt_at} />
+                    <DrawerField label="Final Failure" value={detail.order?.pabbly_final_failure_at} />
                   </DrawerSection>
                   <details className="sr-drawer-section">
                     <summary>View Raw Shiprocket JSON</summary>

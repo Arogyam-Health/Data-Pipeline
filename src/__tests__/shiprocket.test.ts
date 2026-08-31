@@ -936,3 +936,55 @@ describe("Retry Logic", () => {
     expect(isDeadLetter(4, 5)).toBe(false);
   });
 });
+
+describe("Pabbly dispatch architecture", () => {
+  it("defaults to Pabbly disabled", () => {
+    expect(process.env.SHIPROCKET_PABBLY_ENABLED).toBe("false");
+  });
+
+  it("includes pabbly_status in explorer columns", () => {
+    expect(SHIPROCKET_EXPLORER_COLUMN_SET.has("pabbly_status")).toBe(true);
+    expect(SHIPROCKET_EXPLORER_COLUMN_SET.has("pabbly_attempt_count")).toBe(true);
+    expect(SHIPROCKET_EXPLORER_COLUMN_SET.has("pabbly_sent_at")).toBe(true);
+    expect(SHIPROCKET_EXPLORER_COLUMN_SET.has("pabbly_delivery_count")).toBe(true);
+    expect(SHIPROCKET_EXPLORER_COLUMN_SET.has("pabbly_sent_count")).toBe(true);
+    expect(SHIPROCKET_EXPLORER_COLUMN_SET.has("pabbly_failed_count")).toBe(true);
+  });
+
+  it("includes pabbly fields in filter metadata", () => {
+    const pabblyFields = SHIPROCKET_FILTER_FIELDS.filter((f) => f.group === "Pabbly Delivery");
+    expect(pabblyFields.length).toBeGreaterThanOrEqual(6);
+    const pabblyStatus = pabblyFields.find((f) => f.key === "pabbly_status");
+    expect(pabblyStatus).toBeDefined();
+    expect(pabblyStatus!.type).toBe("enum");
+  });
+
+  it("computes Pabbly KPIs in overview", () => {
+    const overview = computeOverviewFromRows([
+      { sr_order_id: "SR-1", pabbly_status: "sent" },
+      { sr_order_id: "SR-2", pabbly_status: "sent" },
+      { sr_order_id: "SR-3", pabbly_status: "failed" },
+      { sr_order_id: "SR-4", pabbly_status: "pending" },
+      { sr_order_id: "SR-5", pabbly_status: "retrying" },
+      { sr_order_id: "SR-6" },
+    ]);
+    expect(overview.pabblySent).toBe(2);
+    expect(overview.pabblyFailed).toBe(1);
+    expect(overview.pabblyPending).toBe(1);
+    expect(overview.pabblyRetrying).toBe(1);
+    expect(overview.pabblyTotalDeliveries).toBe(5);
+  });
+
+  it("handles null/empty Pabbly status in overview", () => {
+    const overview = computeOverviewFromRows([
+      { sr_order_id: "SR-1" },
+      { sr_order_id: "SR-2", pabbly_status: "" },
+      { sr_order_id: "SR-3", pabbly_status: null },
+    ]);
+    expect(overview.pabblySent).toBe(0);
+    expect(overview.pabblyFailed).toBe(0);
+    expect(overview.pabblyPending).toBe(0);
+    expect(overview.pabblyRetrying).toBe(0);
+    expect(overview.pabblyTotalDeliveries).toBe(0);
+  });
+});

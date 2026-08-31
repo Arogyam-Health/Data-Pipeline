@@ -12,6 +12,7 @@
 (process.env as Record<string, string>).SHOPIFY_SYNC_ENABLED = "false";
 (process.env as Record<string, string>).SHOPIFY_SYNC_INTERVAL_MINUTES = "15";
 (process.env as Record<string, string>).SHOPIFY_INTERNAL_SYNC_SECRET = "test-shopify-sync-secret";
+(process.env as Record<string, string>).CRON_SECRET = "test-cron-secret";
 (process.env as Record<string, string>).SHOPIFY_BACKFILL_DAYS = "90";
 (process.env as Record<string, string>).SHOPIFY_TEST_FETCH_DAYS = "3";
 (process.env as Record<string, string>).SHOPIFY_INCREMENTAL_BUFFER_MINUTES = "10";

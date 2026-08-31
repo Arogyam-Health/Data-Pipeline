@@ -49,7 +49,8 @@ export type FilterGroup =
   | "Customer / Shopify"
   | "Payment / Order"
   | "Remittance / Settlement"
-  | "Sync / Data Quality";
+  | "Sync / Data Quality"
+  | "Pabbly Delivery";
 
 export interface FilterFieldMeta {
   key: string;
@@ -226,6 +227,17 @@ export const SHIPROCKET_FILTER_FIELDS: FilterFieldMeta[] = [
     column: "raw_payload",
     group: "Sync / Data Quality",
   },
+  enm("pabbly_status", "Pabbly Status", "Pabbly Delivery"),
+  num("pabbly_attempt_count", "Pabbly Attempt Count", "Pabbly Delivery"),
+  date("pabbly_sent_at", "Pabbly Sent At", "Pabbly Delivery"),
+  date("pabbly_first_attempt_at", "Pabbly First Attempt", "Pabbly Delivery"),
+  date("pabbly_last_attempt_at", "Pabbly Last Attempt", "Pabbly Delivery"),
+  date("pabbly_next_attempt_at", "Pabbly Next Attempt", "Pabbly Delivery"),
+  date("pabbly_final_failure_at", "Pabbly Final Failure", "Pabbly Delivery"),
+  text("pabbly_last_error", "Pabbly Last Error", "Pabbly Delivery"),
+  num("pabbly_delivery_count", "Pabbly Delivery Count", "Pabbly Delivery"),
+  num("pabbly_sent_count", "Pabbly Sent Count", "Pabbly Delivery"),
+  num("pabbly_failed_count", "Pabbly Failed Count", "Pabbly Delivery"),
 ];
 
 export const FILTER_FIELD_MAP = new Map(

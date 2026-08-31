@@ -2,7 +2,6 @@ import { getSupabaseClient } from "@/lib/supabase/admin";
 import { logger } from "@/lib/logger";
 import { calculateRetryDelay, isDeadLetter } from "@/lib/integrations/retry";
 import { extractWebhookFields, toOrderRow } from "./parser";
-import { sendToPabbly } from "./pabbly";
 import { isStaleWebhook, mergeShiprocketOrderRow } from "./merge";
 import { enrichShiprocketOrder } from "./enrichment";
 import type { ShiprocketOrderRow, ShiprocketWebhookPayload } from "./types";
@@ -164,7 +163,7 @@ export async function processShiprocketEvent(
       });
     }
 
-    // 6. Send to Pabbly if enabled (default false — Apps Script remains production)
+    // 6. Create pending Pabbly delivery record (dispatch handled by Next.js processor)
     if (env.SHIPROCKET_PABBLY_ENABLED && env.PABBLY_SHIPROCKET_URL) {
       const { data: existingOrder } = await supabase
         .from("shiprocket_orders")
@@ -176,12 +175,11 @@ export async function processShiprocketEvent(
         ? "updated_existing_row"
         : "created_new_row";
 
-      await sendToPabbly(
+      await createPabblyDeliveryRecord(
         eventId,
         fields.sr_order_id,
-        payload as Record<string, unknown>,
-        sheetAction,
-        ""
+        fields.order_id,
+        sheetAction
       );
     }
 
@@ -310,6 +308,53 @@ async function replaceShiprocketScans(
     logger.warn("Failed to insert Shiprocket scans", {
       sr_order_id: srOrderId,
       error: insertError.message,
+    });
+  }
+}
+
+async function createPabblyDeliveryRecord(
+  eventId: string,
+  srOrderId: string,
+  orderId: string | null,
+  sheetAction: string
+): Promise<void> {
+  const supabase = getSupabaseClient();
+
+  const { data: existing } = await supabase
+    .from("shiprocket_pabbly_deliveries")
+    .select("id, status")
+    .eq("event_id", eventId)
+    .in("status", ["sent", "processing", "pending", "retrying"])
+    .maybeSingle();
+
+  if (existing) return;
+
+  const { error } = await supabase
+    .from("shiprocket_pabbly_deliveries")
+    .upsert(
+      {
+        event_id: eventId,
+        sr_order_id: srOrderId,
+        order_id: orderId,
+        status: "pending",
+        attempt_count: 0,
+        first_attempt_at: new Date().toISOString(),
+        next_attempt_at: new Date().toISOString(),
+      },
+      { onConflict: "event_id" }
+    );
+
+  if (error) {
+    logger.error("Failed to create Pabbly delivery record", {
+      event_id: eventId,
+      sr_order_id: srOrderId,
+      error: error.message,
+    });
+  } else {
+    logger.info("Pabbly delivery record created", {
+      event_id: eventId,
+      sr_order_id: srOrderId,
+      sheet_action: sheetAction,
     });
   }
 }

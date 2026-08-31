@@ -284,18 +284,15 @@ async function processEvent(
       queue_msg_id: msgId,
     });
 
-    // Send to Pabbly only when explicitly enabled (default false during parallel validation)
-    const pabblyUrl = Deno.env.get("PABBLY_SHIPROCKET_URL");
-    const pabblyEnabled =
-      Deno.env.get("SHIPROCKET_PABBLY_ENABLED") === "true";
+    // Create pending Pabbly delivery record (dispatch handled by Next.js processor)
+    const pabblyEnabled = Deno.env.get("SHIPROCKET_PABBLY_ENABLED") === "true";
 
-    if (pabblyEnabled && pabblyUrl) {
-      await sendToPabbly(
+    if (pabblyEnabled) {
+      await createPabblyDeliveryRecord(
         supabase,
         eventId,
         fields.sr_order_id,
-        payload,
-        pabblyUrl
+        fields.order_id
       );
     }
 
@@ -361,149 +358,54 @@ async function processEvent(
   }
 }
 
-async function sendToPabbly(
+/**
+ * Creates a pending Pabbly delivery record.
+ * The actual HTTP dispatch is handled by the Next.js Pabbly processor
+ * (POST /api/internal/shiprocket/pabbly/dispatch) to avoid blocking the
+ * Edge Worker and to centralize retry logic.
+ */
+async function createPabblyDeliveryRecord(
   supabase: ReturnType<typeof getSupabaseClient>,
   eventId: string,
-  srOrderKey: string,
-  payload: Record<string, unknown>,
-  pabblyUrl: string
+  srOrderId: string,
+  orderId: string | null
 ): Promise<void> {
+  // Idempotent: skip if already delivered or already pending/processing
   const { data: existing } = await supabase
-    
     .from("shiprocket_pabbly_deliveries")
-    .select("id")
+    .select("id, status")
     .eq("event_id", eventId)
-    .eq("status", "sent")
-    .single();
+    .in("status", ["sent", "processing", "pending", "retrying"])
+    .maybeSingle();
 
   if (existing) return;
 
-  const { data: delivery } = await supabase
-    
+  const { error } = await supabase
     .from("shiprocket_pabbly_deliveries")
     .upsert(
       {
         event_id: eventId,
+        sr_order_id: srOrderId,
+        order_id: orderId,
         status: "pending",
         attempt_count: 0,
         first_attempt_at: new Date().toISOString(),
+        next_attempt_at: new Date().toISOString(),
       },
       { onConflict: "event_id" }
-    )
-    .select("id")
-    .single();
+    );
 
-  if (!delivery) return;
-
-  const { data: orderRow } = await supabase
-    .from("shiprocket_order_explorer")
-    .select("*")
-    .eq("sr_order_id", srOrderKey)
-    .single();
-
-  if (!orderRow) return;
-
-  const pabblyPayload: Record<string, unknown> = {
-    "Shiprocket Unique Key": orderRow.unique_key ?? "",
-    "Sr Order Id": orderRow.sr_order_id ?? "",
-    "Shipment Status Id": orderRow.shipment_status_id ?? "",
-    "Shipment Status": orderRow.shipment_status ?? "",
-    "Scans 1 Status": orderRow.scans1_status ?? "",
-    "Scans 1 Sr-status-label": orderRow.scans1_sr_status_label ?? "",
-    "Scans 1 Sr-status": orderRow.scans1_sr_status ?? "",
-    "Scans 1 Location": orderRow.scans1_location ?? "",
-    "Scans 1 Date": orderRow.scans1_date ?? "",
-    "Scans 1 Activity": orderRow.scans1_activity ?? "",
-    "Scans 0 Status": orderRow.scans0_status ?? "",
-    "Scans 0 Sr-status-label": orderRow.scans0_sr_status_label ?? "",
-    "Scans 0 Sr-status": orderRow.scans0_sr_status ?? "",
-    "Scans 0 Location": orderRow.scans0_location ?? "",
-    "Scans 0 Date": orderRow.scans0_date ?? "",
-    "Scans 0 Activity": orderRow.scans0_activity ?? "",
-    "Order Id": orderRow.order_id ?? "",
-    "Is Return": orderRow.is_return ?? "",
-    Etd: orderRow.etd ?? "",
-    "Current Timestamp": orderRow.current_ts ?? "",
-    "Current Status Id": orderRow.current_status_id ?? "",
-    "Current Status": orderRow.current_status ?? "",
-    "Courier Name": orderRow.courier_name ?? "",
-    "Channel Id": orderRow.channel_id ?? "",
-    Awb: orderRow.awb ?? "",
-    "Order Date": orderRow.order_date ?? "",
-    "Created At": orderRow.created_at_sr ?? "",
-    "Customer Name": orderRow.customer_name_shopify ?? "",
-    "Customer Email": orderRow.customer_email ?? "",
-    "Customer Phone": orderRow.customer_phone_shopify ?? "",
-    "Pickup Location": orderRow.pickup_location ?? "",
-    "Payment Status": orderRow.payment_status ?? "",
-    "Payment Method": orderRow.payment_method ?? "",
-    "Order Total": orderRow.order_total ?? "",
-    Tax: orderRow.tax ?? "",
-    "Order Status": orderRow.order_status ?? "",
-    "Order Status Code": orderRow.order_status_code ?? "",
-    "Shipment ID": orderRow.shipment_id ?? "",
-    "Tracking URL": orderRow.tracking_url ?? "",
-    "Delivered Date": orderRow.delivered_date ?? "",
-    Products: orderRow.products ?? "",
-    "Last Local API Sync At": orderRow.last_local_api_sync_at ?? "",
-    "Last Webhook Sync At": orderRow.last_webhook_sync_at ?? "",
-    Coach: orderRow.coach ?? "",
-    "order id shopify format": orderRow.order_id_shopify_format ?? "",
-    "Sheet Action": "created_new_row",
-    "Sheet Row Number": "",
-    "Sheet Error": "",
-    "Webhook Event Id": eventId,
-    "Pabbly Idempotency Key": eventId,
-  };
-  for (let i = 47; i <= 67; i++) {
-    pabblyPayload[`Column ${i}`] = "";
-  }
-
-  try {
-    const response = await fetch(pabblyUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(pabblyPayload),
-    });
-
-    const responseBody = await response.text();
-    let parsedBody: Record<string, unknown> = {};
-    try {
-      parsedBody = JSON.parse(responseBody);
-    } catch {
-      parsedBody = { raw: responseBody };
-    }
-
-    await supabase
-      
-      .from("shiprocket_pabbly_deliveries")
-      .update({
-        status: response.ok ? "sent" : "failed",
-        attempt_count: 1,
-        response_code: response.status,
-        response_body: parsedBody,
-        last_attempt_at: new Date().toISOString(),
-        sent_at: response.ok ? new Date().toISOString() : null,
-      })
-      .eq("id", delivery.id);
-
-    logger.info("Pabbly delivery result", {
+  if (error) {
+    logger.error("Failed to create Pabbly delivery record", {
       event_id: eventId,
-      sr_order_id: srOrderKey,
-      success: response.ok,
-      status: response.status,
+      sr_order_id: srOrderId,
+      error: error.message,
     });
-  } catch (err) {
-    await supabase
-      
-      .from("shiprocket_pabbly_deliveries")
-      .update({
-        status: "failed",
-        attempt_count: 1,
-        last_error: err instanceof Error ? err.message : String(err),
-        last_attempt_at: new Date().toISOString(),
-      })
-      .eq("id", delivery.id);
+  } else {
+    logger.info("Pabbly delivery record created", {
+      event_id: eventId,
+      sr_order_id: srOrderId,
+    });
   }
 }
 

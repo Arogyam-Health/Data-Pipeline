@@ -1,6 +1,6 @@
 export { extractWebhookFields, toOrderRow } from "./parser";
 export { processShiprocketEvent } from "./service";
-export { sendToPabbly } from "./pabbly";
+export { sendToPabbly, dispatchPendingDeliveries, retrySingleDelivery } from "./pabbly";
 export {
   extractShopifyOrderId,
   normalizeShopifyLegacyPhone,

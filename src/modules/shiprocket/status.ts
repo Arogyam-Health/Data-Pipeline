@@ -42,6 +42,12 @@ export interface OverviewRowInput {
   latest_order_settlement_value?: number | string | null;
   shopify_order_identifier?: string | null;
   customer_phone_shopify?: string | null;
+  pabbly_status?: string | null;
+  pabbly_attempt_count?: number | null;
+  pabbly_sent_at?: string | null;
+  pabbly_delivery_count?: number | null;
+  pabbly_sent_count?: number | null;
+  pabbly_failed_count?: number | null;
 }
 
 export interface ShiprocketOverview {
@@ -63,6 +69,11 @@ export interface ShiprocketOverview {
   distinctUtrs: number;
   shopifyMatchPct: number;
   phoneCoveragePct: number;
+  pabblySent: number;
+  pabblyFailed: number;
+  pabblyPending: number;
+  pabblyRetrying: number;
+  pabblyTotalDeliveries: number;
 }
 
 function asNumber(value: unknown): number {
@@ -87,6 +98,10 @@ export function computeOverviewFromRows(rows: OverviewRowInput[]): ShiprocketOve
   let orderSettlementValue = 0;
   let shopifyMatched = 0;
   let phoneCoverage = 0;
+  let pabblySent = 0;
+  let pabblyFailed = 0;
+  let pabblyPending = 0;
+  let pabblyRetrying = 0;
   const crfs = new Set<string>();
   const utrs = new Set<string>();
 
@@ -119,7 +134,16 @@ export function computeOverviewFromRows(rows: OverviewRowInput[]): ShiprocketOve
     if (row.latest_utr) utrs.add(row.latest_utr);
     if (row.shopify_order_identifier) shopifyMatched += 1;
     if (row.customer_phone_shopify) phoneCoverage += 1;
+
+    // Pabbly status counting (from order explorer's latest delivery record)
+    const pabbly = String(row.pabbly_status ?? "").toLowerCase();
+    if (pabbly === "sent") pabblySent += 1;
+    else if (pabbly === "failed") pabblyFailed += 1;
+    else if (pabbly === "pending" || pabbly === "processing") pabblyPending += 1;
+    else if (pabbly === "retrying") pabblyRetrying += 1;
   }
+
+  const pabblyTotalDeliveries = pabblySent + pabblyFailed + pabblyPending + pabblyRetrying;
 
   return {
     totalOrders,
@@ -140,5 +164,10 @@ export function computeOverviewFromRows(rows: OverviewRowInput[]): ShiprocketOve
     distinctUtrs: utrs.size,
     shopifyMatchPct: totalOrders > 0 ? Math.round((shopifyMatched / totalOrders) * 1000) / 10 : 0,
     phoneCoveragePct: totalOrders > 0 ? Math.round((phoneCoverage / totalOrders) * 1000) / 10 : 0,
+    pabblySent,
+    pabblyFailed,
+    pabblyPending,
+    pabblyRetrying,
+    pabblyTotalDeliveries,
   };
 }

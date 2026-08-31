@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/internal/shopify/sync",
+      "schedule": "7,22,37,52 * * * *"
+    },
+    {
+      "path": "/api/internal/shiprocket/pabbly/dispatch",
+      "schedule": "* * * * *"
+    }
+  ]
+}

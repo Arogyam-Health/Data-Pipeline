@@ -102,6 +102,17 @@ export const SHIPROCKET_EXPLORER_COLUMNS = [
   "latest_adjusted_amount",
   "latest_remarks",
   "remittance_match_status",
+  "pabbly_status",
+  "pabbly_attempt_count",
+  "pabbly_first_attempt_at",
+  "pabbly_last_attempt_at",
+  "pabbly_sent_at",
+  "pabbly_last_error",
+  "pabbly_next_attempt_at",
+  "pabbly_final_failure_at",
+  "pabbly_delivery_count",
+  "pabbly_sent_count",
+  "pabbly_failed_count",
 ] as const;
 
 export type ShiprocketExplorerColumn = (typeof SHIPROCKET_EXPLORER_COLUMNS)[number];
