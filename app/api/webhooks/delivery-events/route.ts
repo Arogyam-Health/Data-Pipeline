@@ -6,7 +6,6 @@ import { getEnv } from "@/config/env";
 import { logger } from "@/lib/logger";
 import {
   extractShiprocketWebhookSecret,
-  forwardRawWebhookToAppsScript,
 } from "@/modules/shiprocket/forward";
 
 export const maxDuration = 60;
@@ -35,11 +34,7 @@ export async function HEAD() {
  * Lightweight webhook receiver. Does:
  * 1. Authenticate webhook
  * 2. Read raw body
- * 3. Forward the exact raw body to the existing Apps Script URL (if configured)
- * 4. Ingest into Supabase / PGMQ
- *
- * Apps Script / Sheet / production Pabbly stay intact when the forward URL is set.
- * This app still does NOT send to production Pabbly unless SHIPROCKET_PABBLY_ENABLED=true.
+ * 3. Ingest into Supabase / PGMQ
  */
 export async function POST(request: NextRequest) {
   const env = getEnv();
@@ -84,27 +79,6 @@ export async function POST(request: NextRequest) {
   if (env.SHIPROCKET_LOG_WEBHOOK_PAYLOAD) {
     console.log("[delivery-events] complete Shiprocket webhook payload");
     console.log(JSON.stringify(payload, null, 2));
-  }
-
-  const appsScriptUrl = env.SHIPROCKET_APPS_SCRIPT_WEBHOOK_URL;
-  if (appsScriptUrl) {
-    const forwarded = await forwardRawWebhookToAppsScript({
-      url: appsScriptUrl,
-      rawBody,
-    });
-    if (!forwarded.ok) {
-      return NextResponse.json(
-        {
-          error: "Apps Script forward failed",
-          forwarded: false,
-        },
-        { status: 502 }
-      );
-    }
-  } else {
-    logger.warn(
-      "SHIPROCKET_APPS_SCRIPT_WEBHOOK_URL is not set; this request was not forwarded to Apps Script"
-    );
   }
 
   const requestHash = computeRequestHash(rawBody);

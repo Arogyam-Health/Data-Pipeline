@@ -1,16 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
-import { dispatchPendingDeliveries } from "@/modules/shiprocket";
+import { dispatchPendingDeliveries, processShiprocketEvent } from "@/modules/shiprocket";
 
 /**
- * POST /api/internal/shiprocket/pabbly/dispatch
+ * POST/GET /api/internal/shiprocket/pabbly/dispatch
  *
- * Triggers the Pabbly dispatch processor.
- * Fetches pending delivery records, builds payloads from
- * shiprocket_order_explorer, sends to Pabbly, logs results.
+ * Two-in-one worker endpoint (replaces the missing Supabase Edge Function):
+ * 1. Process pending PGMQ queue messages → creates shiprocket_pabbly_deliveries rows
+ * 2. Dispatch pending deliveries → sends to Pabbly
  *
  * Protected by WORKER_SECRET or CRON_SECRET header.
  */
-export async function POST(request: NextRequest) {
+export const maxDuration = 60;
+
+async function handleDispatch(request: NextRequest) {
   const authHeader = request.headers.get("authorization");
   const workerSecret = process.env.WORKER_SECRET;
   const cronSecret = process.env.CRON_SECRET;
@@ -45,13 +47,66 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const supabase = (await import("@/lib/supabase/admin")).getSupabaseClient();
+
+  // Step 1: Process pending PGMQ queue messages → creates pabbly delivery rows
+  const BATCH_SIZE = 20;
+  const VISIBILITY_TIMEOUT = 300;
+
+  let queueProcessed = 0;
+  let queueErrors: string[] = [];
+
   try {
-    const result = await dispatchPendingDeliveries();
-    return NextResponse.json({ success: true, ...result });
+    const { data: messages, error: readError } = await supabase.rpc(
+      "read_shiprocket_queue",
+      { p_batch_size: BATCH_SIZE, p_visibility_timeout: VISIBILITY_TIMEOUT }
+    );
+
+    if (readError) {
+      queueErrors.push(`Queue read failed: ${readError.message}`);
+    } else if (messages && messages.length > 0) {
+      for (const msg of messages) {
+        const eventId = msg.message?.event_id;
+        const msgId = msg.msg_id;
+        if (!eventId || msgId == null) continue;
+
+        const result = await processShiprocketEvent(eventId, msgId);
+        if (result.success) queueProcessed++;
+        else queueErrors.push(`Event ${eventId}: ${result.error}`);
+      }
+    }
+  } catch (err) {
+    queueErrors.push(`Queue processing error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Step 2: Dispatch pending deliveries → sends to Pabbly
+  let dispatchResult;
+  try {
+    dispatchResult = await dispatchPendingDeliveries();
   } catch (err) {
     return NextResponse.json(
-      { success: false, error: err instanceof Error ? err.message : String(err) },
+      {
+        success: false,
+        queueProcessed,
+        queueErrors,
+        dispatchError: err instanceof Error ? err.message : String(err),
+      },
       { status: 500 }
     );
   }
+
+  return NextResponse.json({
+    success: true,
+    queueProcessed,
+    queueErrors,
+    ...dispatchResult,
+  });
+}
+
+export async function GET(request: NextRequest) {
+  return handleDispatch(request);
+}
+
+export async function POST(request: NextRequest) {
+  return handleDispatch(request);
 }
