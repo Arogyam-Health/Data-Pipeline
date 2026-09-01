@@ -220,6 +220,8 @@ export default function ShopifyDashboard() {
               {" · "}
               <strong>Shopify</strong>
               {" · "}
+              <Link href="/dashboard/gokwik">GoKwik</Link>
+              {" · "}
               <Link href="/dashboard/meta">Meta</Link>
               {" · "}
               <Link href="/dashboard/ga4">GA4</Link>

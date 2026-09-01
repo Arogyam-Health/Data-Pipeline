@@ -397,15 +397,90 @@ async function loadSheetColumnsForOrders(
   return result;
 }
 
+export async function loadShopifyGokwikOrders(range: DateRange) {
+  return rpc<{
+    shopify_order_id: string;
+    order_name: string;
+    order_number: string | null;
+    created_at_shopify: string;
+    financial_status: string | null;
+    total_price: number;
+    currency: string | null;
+    notes_edd: string | null;
+    landing_site: string | null;
+    channel_source_name: string | null;
+    utm_source: string | null;
+    utm_medium: string | null;
+    utm_campaign: string | null;
+    utm_content: string | null;
+    utm_term: string | null;
+    meta_fbc: string | null;
+    meta_fbp: string | null;
+    gokwik_cid: string | null;
+    cart_token: string | null;
+    user_agent: string | null;
+    full_url: string | null;
+    customer_ip: string | null;
+    deliver_order_count: string | null;
+    bank_offer_code: string | null;
+    gokwik_payment_id: string | null;
+    payment_provider_name_attr: string | null;
+    payment_provider_payment_id_attr: string | null;
+    channel_information: string | null;
+    shopify_payment_id: string | null;
+    shopify_gateway: string | null;
+  }>("shopify_gokwik_orders_for_range", range);
+}
+
+export async function loadShopifyGokwikOverview(range: DateRange) {
+  const analytics = getAnalyticsClient();
+  const [kpisRows, orders, channel] = await Promise.all([
+    rpc<{
+      total_orders: number;
+      gokwik_tagged_orders: number;
+      with_meta_fbc: number;
+      with_meta_fbp: number;
+      with_customer_ip: number;
+      channel_gokwik_orders: number;
+      gokwik_order_value: number;
+      unique_ips: number;
+    }>("shopify_gokwik_kpis_for_range", range),
+    loadShopifyGokwikOrders(range),
+    rpc<{ channel: string; orders: number; order_value: number }>(
+      "shopify_gokwik_channel_summary_for_range",
+      range
+    ),
+  ]);
+  const recentGokwik = [...orders]
+    .sort((a, b) => new Date(b.created_at_shopify).getTime() - new Date(a.created_at_shopify).getTime())
+    .slice(0, 20);
+  return {
+    kpis: kpisRows[0] ?? {
+      total_orders: 0,
+      gokwik_tagged_orders: 0,
+      with_meta_fbc: 0,
+      with_meta_fbp: 0,
+      with_customer_ip: 0,
+      channel_gokwik_orders: 0,
+      gokwik_order_value: 0,
+      unique_ips: 0,
+    },
+    orders,
+    recentGokwik,
+    channel,
+  };
+}
+
 export async function loadShopifyOrderDetail(orderId: string) {
   const analytics = getAnalyticsClient();
-  const [{ data: order }, { data: lines }] = await Promise.all([
+  const [{ data: order }, { data: lines }, { data: gokwik }] = await Promise.all([
     analytics
       .from("shopify_orders")
       .select("*")
       .eq("shopify_order_id", orderId)
       .maybeSingle(),
     analytics.from("shopify_order_lines").select("*").eq("shopify_order_id", orderId),
+    analytics.from("shopify_gokwik_orders").select("*").eq("shopify_order_id", orderId).maybeSingle(),
   ]);
 
   if (!order) return null;
@@ -413,5 +488,6 @@ export async function loadShopifyOrderDetail(orderId: string) {
   return {
     order,
     lines: lines ?? [],
+    gokwik: gokwik ?? null,
   };
 }

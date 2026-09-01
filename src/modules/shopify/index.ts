@@ -37,6 +37,8 @@ export {
 } from "./internal-auth";
 export {
   loadShopifyDaily,
+  loadShopifyGokwikOrders,
+  loadShopifyGokwikOverview,
   loadShopifyOrderDetail,
   loadShopifyOrders,
   loadShopifyOverview,

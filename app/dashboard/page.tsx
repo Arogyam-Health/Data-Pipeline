@@ -14,6 +14,11 @@ const SOURCES = [
     body: "Orders, products, UTM attribution, and sync health.",
   },
   {
+    href: "/dashboard/gokwik",
+    title: "GoKwik",
+    body: "Shopify GoKwik attribution: meta_fbc/fbp, gokwik_cid, cart_token, customer_ip, full_url, bank offers.",
+  },
+  {
     href: "/dashboard/meta",
     title: "Meta Ads",
     body: "Ad-level daily insights, funnel, and sync health.",
