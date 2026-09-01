@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { authorizeDashboard, dashboardAuthConfigured } from "./internal-auth";
 import { dashboardRangeSchema, ga4ErrorResponse, resolveDashboardDateRange } from "./http";
 import { getProperty } from "./repository";
+import { Ga4ConfigError } from "./errors";
 import { getGa4Env, getGa4PropertyId } from "./env";
 
 export async function withGa4Dashboard<T>(
@@ -32,9 +33,16 @@ export async function withGa4Dashboard<T>(
     }
     let timeZone = process.env.GA4_REPORTING_TIMEZONE || "";
     try {
-      const property = await getProperty(getGa4PropertyId(getGa4Env()));
+      const env = getGa4Env();
+      const property = await getProperty(getGa4PropertyId(env));
       timeZone = property?.reporting_timezone || timeZone;
-    } catch {
+    } catch (err) {
+      if (err instanceof Ga4ConfigError) {
+        return NextResponse.json(
+          { success: false, disabled: true, error: "GA4 not configured. Set GA4 env vars to enable." },
+          { status: 200 }
+        );
+      }
       timeZone = timeZone || "UTC";
     }
     const range = resolveDashboardDateRange({ ...parsed.data, timeZone: timeZone || "UTC" });
@@ -52,6 +60,12 @@ export async function withGa4Dashboard<T>(
     const data = await loader({ range, query });
     return NextResponse.json({ success: true, range, query, ...(isPlainObject(data) ? data : { data }) });
   } catch (err) {
+    if (err instanceof Ga4ConfigError) {
+      return NextResponse.json(
+        { success: false, disabled: true, error: "GA4 not configured. Set GA4 env vars to enable." },
+        { status: 200 }
+      );
+    }
     return ga4ErrorResponse(err);
   }
 }

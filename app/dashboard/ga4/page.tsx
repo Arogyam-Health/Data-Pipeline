@@ -155,6 +155,7 @@ export default function Ga4Dashboard() {
       try {
         const response = await fetch(`/api/ga4/analytics/overview?${query}`);
         const body = await response.json();
+        if (body.disabled) throw new Error(body.error || "GA4 not configured");
         if (!response.ok) throw new Error(body.error || "Failed to load GA4 analytics");
         if (!cancelled) setData(body);
       } catch (err) {
