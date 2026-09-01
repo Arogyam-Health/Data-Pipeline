@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { authorizeInternalSync, runShopifySync } from "@/modules/shopify";
+import { authorizeInternalSync, runShopifySync, getSyncStatus } from "@/modules/shopify";
 import { shopifyErrorResponse } from "@/modules/shopify/http";
 
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 async function runIncremental(request: NextRequest) {
   if (!authorizeInternalSync(request.headers.get("authorization"))) {
@@ -10,7 +10,16 @@ async function runIncremental(request: NextRequest) {
   }
 
   try {
-    const result = await runShopifySync({ mode: "incremental", requireEnabled: true });
+    let result;
+    try {
+      result = await runShopifySync({ mode: "incremental", requireEnabled: true });
+    } catch (err: unknown) {
+      if (err && typeof err === "object" && "code" in err && (err as { code: string }).code === "WATERMARK_MISSING") {
+        result = await runShopifySync({ mode: "test", requireEnabled: true });
+      } else {
+        throw err;
+      }
+    }
     return NextResponse.json({
       success: result.success,
       runId: result.runId,

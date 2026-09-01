@@ -160,6 +160,55 @@ const SHIPPING_LINE_FIELDS = `
   source
 `;
 
+const CHILD_FULFILLMENT = `
+  id
+  createdAt
+  updatedAt
+  name
+  status
+  displayStatus
+  service { serviceName }
+  trackingInfo {
+    company
+    number
+    url
+  }
+  fulfillmentLineItems(first: 5) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id
+      quantity
+      lineItem { id }
+    }
+  }
+`;
+
+const CHILD_REFUND = `
+  id
+  createdAt
+  updatedAt
+  note
+  refundLineItems(first: 5) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id
+      quantity
+      restockType
+      lineItem { id }
+      priceSet { ${MONEY} }
+      subtotalSet { ${MONEY} }
+      totalTaxSet { ${MONEY} }
+    }
+  }
+  refundShippingLines(first: 5) {
+    nodes {
+      id
+      subtotalAmountSet { ${MONEY} }
+      taxAmountSet { ${MONEY} }
+    }
+  }
+`;
+
 const ORDER_FIELDS = `
   id
   legacyResourceId
@@ -277,54 +326,20 @@ const ORDER_FIELDS = `
       ${LINE_ITEM}
     }
   }
-`;
-
-const CHILD_FULFILLMENT = `
-  id
-  createdAt
-  updatedAt
-  name
-  status
-  displayStatus
-  service { serviceName }
-  trackingInfo {
-    company
-    number
-    url
+  fulfillments(first: $nestedFirst) {
+    ${CHILD_FULFILLMENT}
   }
-  fulfillmentLineItems(first: 5) {
+  shippingLines(first: $nestedFirst, includeRemovals: true) {
     pageInfo { hasNextPage endCursor }
     nodes {
-      id
-      quantity
-      lineItem { id }
+      ${SHIPPING_LINE_FIELDS}
     }
   }
-`;
-
-const CHILD_REFUND = `
-  id
-  createdAt
-  updatedAt
-  note
-  refundLineItems(first: 5) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
-      id
-      quantity
-      restockType
-      lineItem { id }
-      priceSet { ${MONEY} }
-      subtotalSet { ${MONEY} }
-      totalTaxSet { ${MONEY} }
-    }
+  transactions(first: $nestedFirst) {
+    ${TRANSACTION}
   }
-  refundShippingLines(first: 5) {
-    nodes {
-      id
-      subtotalAmountSet { ${MONEY} }
-      taxAmountSet { ${MONEY} }
-    }
+  refunds(first: $nestedFirst) {
+    ${CHILD_REFUND}
   }
 `;
 

@@ -33,6 +33,7 @@ import {
   createSyncRun,
   finishSyncRun,
   getActiveBackfillJob,
+  getExistingOrderIds,
   getLatestSyncRun,
   getSyncState,
   persistNormalizedOrder,
@@ -121,6 +122,17 @@ export function computeSyncWindow(input: {
   };
 }
 
+function logShopifySyncDebug(
+  env: ShopifyEnv,
+  message: string,
+  meta: Record<string, unknown> = {}
+): void {
+  if (!env.SHOPIFY_SYNC_DEBUG) return;
+  logger.info(message, { provider: INTEGRATION, ...meta });
+}
+
+const PERSIST_CONCURRENCY = 5;
+
 export function shouldAdvanceWatermark(
   mode: SyncMode,
   status: SyncStatus,
@@ -187,6 +199,7 @@ export async function expandNestedConnections(
   client: ShopifyGraphqlClient,
   order: ShopifyOrderNode
 ): Promise<ShopifyOrderNode> {
+  const startedAt = Date.now();
   const nestedFirst = DETAIL_NESTED_FIRST;
   const orderId = order.id;
   if (!orderId) return order;
@@ -198,7 +211,17 @@ export async function expandNestedConnections(
     order.shippingLines == null &&
     order.transactions == null;
 
+  logShopifySyncDebug(client.env, "Shopify order expansion started", {
+    order_id: orderId,
+    missing_children: missingChildren,
+    initial_line_items: connectionNodes(order.lineItems).length,
+  });
+
   if (missingChildren) {
+    logShopifySyncDebug(client.env, "Shopify order children requested", {
+      order_id: orderId,
+      nested_first: nestedFirst,
+    });
     const extra = await client.request<{ order?: ShopifyOrderNode }>(ORDER_CHILDREN_QUERY, {
       id: orderId,
       nestedFirst,
@@ -216,7 +239,9 @@ export async function expandNestedConnections(
 
   let lineItems = connectionNodes(working.lineItems);
   let lineAfter = nextCursor(working.lineItems);
+  let extraLineItemPages = 0;
   while (lineAfter) {
+    extraLineItemPages += 1;
     const extra = await client.request<{
       order?: { lineItems?: Connection<ShopifyLineItemNode> };
     }>(ORDER_LINE_ITEMS_QUERY, {
@@ -230,12 +255,14 @@ export async function expandNestedConnections(
   }
 
   let fulfillments = connectionNodes(working.fulfillments);
+  let extraFulfillmentPages = 0;
   for (let i = 0; i < fulfillments.length; i += 1) {
     const fulfillment = fulfillments[i];
     if (!fulfillment.id || !fulfillment.fulfillmentLineItems?.pageInfo?.hasNextPage) continue;
     let items = connectionNodes(fulfillment.fulfillmentLineItems);
     let after = nextCursor(fulfillment.fulfillmentLineItems);
     while (after) {
+      extraFulfillmentPages += 1;
       const extra = await client.request<{
         fulfillment?: { fulfillmentLineItems?: Connection<ShopifyFulfillmentLineItemNode> };
       }>(ORDER_FULFILLMENT_ITEMS_QUERY, {
@@ -254,6 +281,7 @@ export async function expandNestedConnections(
   }
 
   const refunds = connectionNodes(working.refunds);
+  let extraRefundPages = 0;
 
   for (let i = 0; i < refunds.length; i += 1) {
     const refund = refunds[i];
@@ -261,6 +289,7 @@ export async function expandNestedConnections(
     let items = connectionNodes(refund.refundLineItems);
     let after = nextCursor(refund.refundLineItems);
     while (after) {
+      extraRefundPages += 1;
       const extra = await client.request<{
         refund?: { refundLineItems?: Connection<ShopifyRefundLineItemNode> };
       }>(ORDER_REFUND_ITEMS_QUERY, {
@@ -280,6 +309,7 @@ export async function expandNestedConnections(
 
   let shippingLines = connectionNodes(working.shippingLines);
   let shippingAfter = nextCursor(working.shippingLines);
+  let extraShippingPages = 0;
   if (working.shippingLines == null) {
     const extra = await client.request<{
       order?: { shippingLines?: Connection<ShopifyShippingLineNode> };
@@ -293,6 +323,7 @@ export async function expandNestedConnections(
     shippingAfter = nextCursor(page);
   }
   while (shippingAfter) {
+    extraShippingPages += 1;
     const extra = await client.request<{
       order?: { shippingLines?: Connection<ShopifyShippingLineNode> };
     }>(ORDER_SHIPPING_LINES_QUERY, {
@@ -306,6 +337,20 @@ export async function expandNestedConnections(
   }
 
   const transactions = connectionNodes(working.transactions);
+
+  logShopifySyncDebug(client.env, "Shopify order expansion finished", {
+    order_id: orderId,
+    line_items: lineItems.length,
+    fulfillments: fulfillments.length,
+    refunds: refunds.length,
+    shipping_lines: shippingLines.length,
+    transactions: transactions.length,
+    extra_line_item_pages: extraLineItemPages,
+    extra_fulfillment_pages: extraFulfillmentPages,
+    extra_refund_pages: extraRefundPages,
+    extra_shipping_pages: extraShippingPages,
+    duration_ms: Date.now() - startedAt,
+  });
 
   return {
     ...working,
@@ -329,6 +374,15 @@ async function fetchOrdersInWindow(
   const search = buildOrdersSearchQuery(from, to);
 
   do {
+    const pageStartedAt = Date.now();
+    logShopifySyncDebug(client.env, "Shopify orders page requested", {
+      page: pagesFetched + 1,
+      page_size: pageSize,
+      has_cursor: Boolean(after),
+      from: from.toISOString(),
+      to: to.toISOString(),
+    });
+
     const result: GraphQLResponse<{
       orders?: {
         nodes?: ShopifyOrderNode[];
@@ -345,7 +399,21 @@ async function fetchOrdersInWindow(
     pagesFetched += 1;
     const page = result.data?.orders;
     const nodes: ShopifyOrderNode[] = connectionNodes(page);
-    for (const node of nodes) {
+    logShopifySyncDebug(client.env, "Shopify orders page received", {
+      page: pagesFetched,
+      orders_in_page: nodes.length,
+      has_next_page: Boolean(page?.pageInfo?.hasNextPage),
+      duration_ms: Date.now() - pageStartedAt,
+      api_requests: client.apiRequests,
+      retries: client.retryCount,
+    });
+
+    for (const [index, node] of nodes.entries()) {
+      logShopifySyncDebug(client.env, "Shopify order expansion queued", {
+        page: pagesFetched,
+        order_index_in_page: index + 1,
+        order_id: node.id,
+      });
       orders.push(await expandNestedConnections(client, node));
     }
     after = page?.pageInfo?.hasNextPage ? page.pageInfo.endCursor ?? null : null;
@@ -358,7 +426,8 @@ async function persistOrders(
   orders: ShopifyOrderNode[],
   runId: string,
   apiVersion: string,
-  counts: SyncRunCounts
+  counts: SyncRunCounts,
+  env: ShopifyEnv
 ): Promise<boolean> {
   let allOk = true;
   counts.ordersFetched += orders.length;
@@ -367,33 +436,78 @@ async function persistOrders(
     await recordSchemaDrift(drift, apiVersion);
   }
 
-  for (const node of orders) {
-    try {
-      const normalized = normalizeOrder(node);
-      const { inserted } = await persistNormalizedOrder(normalized, runId);
-      if (inserted) counts.ordersInserted += 1;
-      else counts.ordersUpdated += 1;
-      counts.itemsUpserted += normalized.line_items.length;
-      if (normalized.customer) counts.customersUpserted += 1;
-      counts.refundsUpserted += normalized.refunds.length;
-      counts.fulfillmentsUpserted += normalized.fulfillments.length;
-    } catch (err) {
+  const existingOrderIds = await getExistingOrderIds(
+    orders
+      .map((node) => node.legacyResourceId)
+      .filter((id): id is string | number => id != null)
+      .map((id) => String(id))
+  );
+
+  for (let start = 0; start < orders.length; start += PERSIST_CONCURRENCY) {
+    const batch = orders.slice(start, start + PERSIST_CONCURRENCY);
+    const results = await Promise.all(
+      batch.map(async (node) => {
+        try {
+          const normalized = normalizeOrder(node);
+          const { inserted } = await persistNormalizedOrder(
+            normalized,
+            runId,
+            existingOrderIds.has(normalized.shopify_order_id)
+          );
+          return {
+            ok: true as const,
+            node,
+            inserted,
+            itemsUpserted: normalized.line_items.length,
+            customersUpserted: normalized.customer ? 1 : 0,
+            refundsUpserted: normalized.refunds.length,
+            fulfillmentsUpserted: normalized.fulfillments.length,
+          };
+        } catch (err) {
+          const message = sanitizeShopifyError(
+            err instanceof Error ? err.message : "order persist failed"
+          );
+          return {
+            ok: false as const,
+            node,
+            error: err,
+            message,
+          };
+        }
+      })
+    );
+
+    for (const result of results) {
+      if (result.ok) {
+        if (result.inserted) counts.ordersInserted += 1;
+        else counts.ordersUpdated += 1;
+        counts.itemsUpserted += result.itemsUpserted;
+        counts.customersUpserted += result.customersUpserted;
+        counts.refundsUpserted += result.refundsUpserted;
+        counts.fulfillmentsUpserted += result.fulfillmentsUpserted;
+        logShopifySyncDebug(env, "Shopify order persisted", {
+          run_id: runId,
+          order_id: result.node.id,
+          inserted: result.inserted,
+          orders_processed: counts.ordersInserted + counts.ordersUpdated,
+          total_orders: orders.length,
+        });
+        continue;
+      }
+
       allOk = false;
-      const message = sanitizeShopifyError(
-        err instanceof Error ? err.message : "order persist failed"
-      );
       logger.error("Shopify order persist failed", {
         provider: INTEGRATION,
         run_id: runId,
-        error: message,
+        error: result.message,
       });
       await recordSyncError({
         syncRunId: runId,
-        shopifyOrderId: node.legacyResourceId ? String(node.legacyResourceId) : null,
+        shopifyOrderId: result.node.legacyResourceId ? String(result.node.legacyResourceId) : null,
         entityType: "order",
         operation: "upsert",
-        errorCode: err instanceof ShopifyError ? err.code : "PERSIST_ERROR",
-        errorMessage: message,
+        errorCode: result.error instanceof ShopifyError ? result.error.code : "PERSIST_ERROR",
+        errorMessage: result.message,
         retryable: false,
       });
     }
@@ -488,6 +602,15 @@ export async function runShopifySync(options: RunSyncOptions): Promise<SyncRunRe
       to: window.actualTo.toISOString(),
     });
 
+    logShopifySyncDebug(env, "Shopify sync debug enabled", {
+      run_id: runId,
+      shop_domain: shopDomain,
+      mode: options.mode,
+      page_size: Math.min(client.env.SHOPIFY_PAGE_SIZE, LIST_ORDER_PAGE_SIZE),
+      nested_first: LIST_NESTED_FIRST,
+      detail_nested_first: DETAIL_NESTED_FIRST,
+    });
+
     const { orders, pagesFetched } = await fetchOrdersInWindow(
       client,
       window.actualFrom,
@@ -497,7 +620,15 @@ export async function runShopifySync(options: RunSyncOptions): Promise<SyncRunRe
     counts.apiRequests = client.apiRequests;
     counts.retryCount = client.retryCount;
 
-    const persisted = await persistOrders(orders, runId, env.SHOPIFY_API_VERSION, counts);
+    logShopifySyncDebug(env, "Shopify fetch completed", {
+      run_id: runId,
+      orders_fetched: orders.length,
+      pages_fetched: pagesFetched,
+      api_requests: counts.apiRequests,
+      retries: counts.retryCount,
+    });
+
+    const persisted = await persistOrders(orders, runId, env.SHOPIFY_API_VERSION, counts, env);
     const status = persisted ? "success" : "partial";
 
     if (shouldAdvanceWatermark(options.mode, status, state?.last_successful_sync_at)) {

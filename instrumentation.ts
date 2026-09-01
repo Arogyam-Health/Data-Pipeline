@@ -2,29 +2,6 @@ export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
   if (process.env.JEST_WORKER_ID) return;
 
-  try {
-    const { startShopifyIncrementalScheduler } = await import(
-      "@/modules/shopify/scheduler"
-    );
-    startShopifyIncrementalScheduler();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown scheduler error";
-    console.error("Shopify incremental scheduler failed to start:", message);
-  }
-
-  try {
-    const { startMetaScheduler } = await import("@/modules/meta/scheduler");
-    startMetaScheduler();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown scheduler error";
-    console.error("Meta scheduler failed to start:", message);
-  }
-
-  try {
-    const { startGa4Scheduler } = await import("@/modules/ga4/scheduler");
-    startGa4Scheduler();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown scheduler error";
-    console.error("GA4 scheduler failed to start:", message);
-  }
+  // Schedulers disabled — cron-job.org handles scheduling externally.
+  // To re-enable, uncomment the imports below.
 }

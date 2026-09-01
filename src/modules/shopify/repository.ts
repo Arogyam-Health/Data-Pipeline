@@ -10,6 +10,40 @@ import type {
   SyncStatus,
 } from "./types";
 
+function shopifyPersistenceDebugEnabled(): boolean {
+  return process.env.SHOPIFY_SYNC_DEBUG === "true";
+}
+
+function logShopifyPersistenceDebug(message: string, meta: Record<string, unknown> = {}): void {
+  if (!shopifyPersistenceDebugEnabled()) return;
+  logger.info(message, { provider: "shopify", ...meta });
+}
+
+async function withPersistenceTiming<T>(
+  label: string,
+  orderId: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    const result = await fn();
+    logShopifyPersistenceDebug("Shopify persistence step finished", {
+      order_id: orderId,
+      step: label,
+      duration_ms: Date.now() - startedAt,
+    });
+    return result;
+  } catch (error) {
+    logShopifyPersistenceDebug("Shopify persistence step failed", {
+      order_id: orderId,
+      step: label,
+      duration_ms: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : "unknown error",
+    });
+    throw error;
+  }
+}
+
 function pipelineClient() {
   return getSupabaseClient();
 }
@@ -292,119 +326,139 @@ async function replaceChildren(
   if (error) throw new Error(`${table} stale cleanup failed: ${error.message}`);
 }
 
-export async function orderExists(orderId: string): Promise<boolean> {
-  const { data } = await pipelineClient()
+export async function getExistingOrderIds(orderIds: string[]): Promise<Set<string>> {
+  if (orderIds.length === 0) return new Set();
+  const { data, error } = await pipelineClient()
     .from("shopify_orders")
     .select("shopify_order_id")
-    .eq("shopify_order_id", orderId)
-    .maybeSingle();
-  return Boolean(data);
+    .in("shopify_order_id", orderIds);
+  if (error) throw new Error(`Failed to load existing Shopify orders: ${error.message}`);
+  return new Set((data ?? []).map((row) => String(row.shopify_order_id)));
 }
 
 export async function persistNormalizedOrder(
   order: NormalizedOrder,
-  syncRunId: string
+  syncRunId: string,
+  existed = false
 ): Promise<{ inserted: boolean }> {
+  const startedAt = Date.now();
   const client = pipelineClient();
   const now = new Date().toISOString();
-  const existed = await orderExists(order.shopify_order_id);
+
+  logShopifyPersistenceDebug("Shopify order persistence started", {
+    order_id: order.shopify_order_id,
+    line_items: order.line_items.length,
+    fulfillments: order.fulfillments.length,
+    refunds: order.refunds.length,
+    shipping_lines: order.shipping_lines.length,
+    transactions: order.transactions.length,
+  });
 
   if (order.customer) {
     const { default_address, ...customer } = order.customer;
-    const { error } = await client.from("shopify_customers").upsert(
-      { ...customer, last_synced_at: now },
-      { onConflict: "customer_id" }
+    const { error } = await withPersistenceTiming(
+      "customer_upsert",
+      order.shopify_order_id,
+      () =>
+        client.from("shopify_customers").upsert(
+          { ...customer, last_synced_at: now },
+          { onConflict: "customer_id" }
+        )
     );
     if (error) throw new Error(`customer upsert failed: ${error.message}`);
 
     if (default_address) {
-      await client.from("shopify_customer_addresses").upsert(
-        {
-          customer_id: order.customer.customer_id,
-          customer_address_id: default_address.customer_address_id,
-          is_default: true,
-          address_key: default_address.address_key,
-          first_name: default_address.first_name,
-          last_name: default_address.last_name,
-          name: default_address.name,
-          company: default_address.company,
-          address1: default_address.address1,
-          address2: default_address.address2,
-          city: default_address.city,
-          province: default_address.province,
-          province_code: default_address.province_code,
-          country: default_address.country,
-          country_code: default_address.country_code,
-          zip: default_address.zip,
-          phone: default_address.phone,
-          latitude: default_address.latitude,
-          longitude: default_address.longitude,
-        },
-        { onConflict: "customer_id,address_key" }
+      await withPersistenceTiming("customer_address_upsert", order.shopify_order_id, () =>
+        client.from("shopify_customer_addresses").upsert(
+          {
+            customer_id: order.customer.customer_id,
+            customer_address_id: default_address.customer_address_id,
+            is_default: true,
+            address_key: default_address.address_key,
+            first_name: default_address.first_name,
+            last_name: default_address.last_name,
+            name: default_address.name,
+            company: default_address.company,
+            address1: default_address.address1,
+            address2: default_address.address2,
+            city: default_address.city,
+            province: default_address.province,
+            province_code: default_address.province_code,
+            country: default_address.country,
+            country_code: default_address.country_code,
+            zip: default_address.zip,
+            phone: default_address.phone,
+            latitude: default_address.latitude,
+            longitude: default_address.longitude,
+          },
+          { onConflict: "customer_id,address_key" }
+        )
       );
     }
   }
 
-  const { error: orderError } = await client.from("shopify_orders").upsert(
-    {
-      shopify_order_id: order.shopify_order_id,
-      admin_graphql_api_id: order.admin_graphql_api_id,
-      app_id: order.app_id,
-      order_name: order.order_name,
-      order_number: order.order_number,
-      confirmation_number: order.confirmation_number,
-      customer_id: order.customer_id,
-      created_at_shopify: order.created_at_shopify,
-      updated_at_shopify: order.updated_at_shopify,
-      processed_at: order.processed_at,
-      closed_at: order.closed_at,
-      cancelled_at: order.cancelled_at,
-      cancel_reason: order.cancel_reason,
-      confirmed: order.confirmed,
-      email: order.email,
-      contact_email: order.contact_email,
-      phone: order.phone,
-      buyer_accepts_marketing: order.buyer_accepts_marketing,
-      currency: order.currency,
-      presentment_currency: order.presentment_currency,
-      financial_status: order.financial_status,
-      fulfillment_status: order.fulfillment_status,
-      subtotal_price: order.subtotal_price,
-      current_subtotal_price: order.current_subtotal_price,
-      total_price: order.total_price,
-      current_total_price: order.current_total_price,
-      total_discounts: order.total_discounts,
-      current_total_discounts: order.current_total_discounts,
-      total_tax: order.total_tax,
-      current_total_tax: order.current_total_tax,
-      total_line_items_price: order.total_line_items_price,
-      total_outstanding: order.total_outstanding,
-      total_tip_received: order.total_tip_received,
-      total_shipping_price: order.total_shipping_price,
-      total_weight: order.total_weight,
-      tax_exempt: order.tax_exempt,
-      taxes_included: order.taxes_included,
-      duties_included: order.duties_included,
-      estimated_taxes: order.estimated_taxes,
-      test: order.test,
-      note: order.note,
-      landing_site: order.landing_site,
-      landing_site_ref: order.landing_site_ref,
-      referring_site: order.referring_site,
-      source_name: order.source_name,
-      source_identifier: order.source_identifier,
-      source_url: order.source_url,
-      location_id: order.location_id,
-      merchant_business_entity_id: order.merchant_business_entity_id,
-      merchant_of_record_app_id: order.merchant_of_record_app_id,
-      payment_gateway_names: order.payment_gateway_names,
-      tags: order.tags,
-      staff_note: order.staff_note,
-      transactions_count: order.transactions_count,
-      last_synced_at: now,
-      last_sync_run_id: syncRunId,
-    },
-    { onConflict: "shopify_order_id" }
+  const { error: orderError } = await withPersistenceTiming("order_upsert", order.shopify_order_id, () =>
+    client.from("shopify_orders").upsert(
+      {
+        shopify_order_id: order.shopify_order_id,
+        admin_graphql_api_id: order.admin_graphql_api_id,
+        app_id: order.app_id,
+        order_name: order.order_name,
+        order_number: order.order_number,
+        confirmation_number: order.confirmation_number,
+        customer_id: order.customer_id,
+        created_at_shopify: order.created_at_shopify,
+        updated_at_shopify: order.updated_at_shopify,
+        processed_at: order.processed_at,
+        closed_at: order.closed_at,
+        cancelled_at: order.cancelled_at,
+        cancel_reason: order.cancel_reason,
+        confirmed: order.confirmed,
+        email: order.email,
+        contact_email: order.contact_email,
+        phone: order.phone,
+        buyer_accepts_marketing: order.buyer_accepts_marketing,
+        currency: order.currency,
+        presentment_currency: order.presentment_currency,
+        financial_status: order.financial_status,
+        fulfillment_status: order.fulfillment_status,
+        subtotal_price: order.subtotal_price,
+        current_subtotal_price: order.current_subtotal_price,
+        total_price: order.total_price,
+        current_total_price: order.current_total_price,
+        total_discounts: order.total_discounts,
+        current_total_discounts: order.current_total_discounts,
+        total_tax: order.total_tax,
+        current_total_tax: order.current_total_tax,
+        total_line_items_price: order.total_line_items_price,
+        total_outstanding: order.total_outstanding,
+        total_tip_received: order.total_tip_received,
+        total_shipping_price: order.total_shipping_price,
+        total_weight: order.total_weight,
+        tax_exempt: order.tax_exempt,
+        taxes_included: order.taxes_included,
+        duties_included: order.duties_included,
+        estimated_taxes: order.estimated_taxes,
+        test: order.test,
+        note: order.note,
+        landing_site: order.landing_site,
+        landing_site_ref: order.landing_site_ref,
+        referring_site: order.referring_site,
+        source_name: order.source_name,
+        source_identifier: order.source_identifier,
+        source_url: order.source_url,
+        location_id: order.location_id,
+        merchant_business_entity_id: order.merchant_business_entity_id,
+        merchant_of_record_app_id: order.merchant_of_record_app_id,
+        payment_gateway_names: order.payment_gateway_names,
+        tags: order.tags,
+        staff_note: order.staff_note,
+        transactions_count: order.transactions_count,
+        last_synced_at: now,
+        last_sync_run_id: syncRunId,
+      },
+      { onConflict: "shopify_order_id" }
+    )
   );
   if (orderError) throw new Error(`order upsert failed: ${orderError.message}`);
 
@@ -429,12 +483,14 @@ export async function persistNormalizedOrder(
       latitude: a.latitude,
       longitude: a.longitude,
     }));
-  await replaceChildren(
-    "shopify_order_addresses",
-    "shopify_order_id",
-    order.shopify_order_id,
-    "address_type",
-    addresses
+  await withPersistenceTiming("order_addresses_replace", order.shopify_order_id, () =>
+    replaceChildren(
+      "shopify_order_addresses",
+      "shopify_order_id",
+      order.shopify_order_id,
+      "address_type",
+      addresses
+    )
   );
 
   const itemRows = order.line_items.map((item) => ({
@@ -464,84 +520,96 @@ export async function persistNormalizedOrder(
     variant_inventory_management: item.variant_inventory_management,
     last_synced_at: now,
   }));
-  await replaceChildren(
-    "shopify_order_items",
-    "shopify_order_id",
-    order.shopify_order_id,
-    "business_key",
-    itemRows
+  await withPersistenceTiming("order_items_replace", order.shopify_order_id, () =>
+    replaceChildren(
+      "shopify_order_items",
+      "shopify_order_id",
+      order.shopify_order_id,
+      "business_key",
+      itemRows
+    )
   );
 
   for (const item of order.line_items) {
-    await replaceChildren(
-      "shopify_line_item_properties",
-      "business_key",
-      item.business_key,
-      "position",
-      item.properties.map((p) => ({
-        business_key: item.business_key,
-        position: p.position,
-        property_name: p.property_name,
-        property_value: p.property_value,
-      }))
+    await withPersistenceTiming("line_item_properties_replace", order.shopify_order_id, () =>
+      replaceChildren(
+        "shopify_line_item_properties",
+        "business_key",
+        item.business_key,
+        "position",
+        item.properties.map((p) => ({
+          business_key: item.business_key,
+          position: p.position,
+          property_name: p.property_name,
+          property_value: p.property_value,
+        }))
+      )
     );
-    await replaceChildren(
-      "shopify_discount_allocations",
-      "order_item_business_key",
-      item.business_key,
-      "discount_application_index",
-      item.discount_allocations.map((a) => ({
-        order_item_business_key: item.business_key,
-        discount_application_index: a.discount_application_index,
-        amount: a.amount,
-      }))
+    await withPersistenceTiming("discount_allocations_replace", order.shopify_order_id, () =>
+      replaceChildren(
+        "shopify_discount_allocations",
+        "order_item_business_key",
+        item.business_key,
+        "discount_application_index",
+        item.discount_allocations.map((a) => ({
+          order_item_business_key: item.business_key,
+          discount_application_index: a.discount_application_index,
+          amount: a.amount,
+        }))
+      )
     );
   }
 
-  await replaceChildren(
-    "shopify_note_attributes",
-    "shopify_order_id",
-    order.shopify_order_id,
-    "position",
-    order.note_attributes.map((a) => ({
-      shopify_order_id: order.shopify_order_id,
-      position: a.position,
-      attribute_name: a.attribute_name,
-      attribute_value: a.attribute_value,
-    }))
+  await withPersistenceTiming("note_attributes_replace", order.shopify_order_id, () =>
+    replaceChildren(
+      "shopify_note_attributes",
+      "shopify_order_id",
+      order.shopify_order_id,
+      "position",
+      order.note_attributes.map((a) => ({
+        shopify_order_id: order.shopify_order_id,
+        position: a.position,
+        attribute_name: a.attribute_name,
+        attribute_value: a.attribute_value,
+      }))
+    )
   );
 
-  await replaceChildren(
-    "shopify_discount_codes",
-    "shopify_order_id",
-    order.shopify_order_id,
-    "position",
-    order.discount_codes.map((d) => ({
-      shopify_order_id: order.shopify_order_id,
-      position: d.position,
-      code: d.code,
-      amount: d.amount,
-      discount_type: d.discount_type,
-    }))
+  await withPersistenceTiming("discount_codes_replace", order.shopify_order_id, () =>
+    replaceChildren(
+      "shopify_discount_codes",
+      "shopify_order_id",
+      order.shopify_order_id,
+      "position",
+      order.discount_codes.map((d) => ({
+        shopify_order_id: order.shopify_order_id,
+        position: d.position,
+        code: d.code,
+        amount: d.amount,
+        discount_type: d.discount_type,
+      }))
+    )
   );
 
-  await replaceChildren(
-    "shopify_discount_applications",
-    "shopify_order_id",
-    order.shopify_order_id,
-    "application_index",
-    order.discount_applications.map((d) => ({
-      shopify_order_id: order.shopify_order_id,
-      application_index: d.application_index,
-      target_type: d.target_type,
-      application_type: d.application_type,
-      value: d.value,
-      value_type: d.value_type,
-      allocation_method: d.allocation_method,
-      target_selection: d.target_selection,
-      title: d.title,
-      description: d.description,
-    }))
+  await withPersistenceTiming("discount_applications_replace", order.shopify_order_id, () =>
+    replaceChildren(
+      "shopify_discount_applications",
+      "shopify_order_id",
+      order.shopify_order_id,
+      "application_index",
+      order.discount_applications.map((d) => ({
+        shopify_order_id: order.shopify_order_id,
+        application_index: d.application_index,
+        target_type: d.target_type,
+        application_type: d.application_type,
+        value: d.value,
+        value_type: d.value_type,
+        allocation_method: d.allocation_method,
+        target_selection: d.target_selection,
+        title: d.title,
+        description: d.description,
+      }))
+    )
   );
 
   const fulfillmentRows = order.fulfillments.map((f) => ({
@@ -562,50 +630,56 @@ export async function persistNormalizedOrder(
     tracking_urls: f.tracking_urls,
     last_synced_at: now,
   }));
-  await replaceChildren(
-    "shopify_fulfillments",
-    "shopify_order_id",
-    order.shopify_order_id,
-    "shopify_fulfillment_id",
-    fulfillmentRows
+  await withPersistenceTiming("fulfillments_replace", order.shopify_order_id, () =>
+    replaceChildren(
+      "shopify_fulfillments",
+      "shopify_order_id",
+      order.shopify_order_id,
+      "shopify_fulfillment_id",
+      fulfillmentRows
+    )
   );
 
   for (const fulfillment of order.fulfillments) {
     const itemByLine = new Map(order.line_items.map((i) => [i.shopify_line_item_id, i]));
-    await replaceChildren(
-      "shopify_fulfillment_items",
-      "shopify_fulfillment_id",
-      fulfillment.shopify_fulfillment_id,
-      "shopify_line_item_id",
-      fulfillment.items
-        .filter((item) => item.shopify_line_item_id)
-        .map((item) => ({
-          shopify_fulfillment_id: fulfillment.shopify_fulfillment_id,
-          shopify_line_item_id: item.shopify_line_item_id,
-          order_item_business_key:
-            itemByLine.get(item.shopify_line_item_id)?.business_key ?? null,
-          quantity: item.quantity,
-        }))
-    );
+      await withPersistenceTiming("fulfillment_items_replace", order.shopify_order_id, () =>
+        replaceChildren(
+          "shopify_fulfillment_items",
+          "shopify_fulfillment_id",
+          fulfillment.shopify_fulfillment_id,
+          "shopify_line_item_id",
+          fulfillment.items
+            .filter((item) => item.shopify_line_item_id)
+            .map((item) => ({
+              shopify_fulfillment_id: fulfillment.shopify_fulfillment_id,
+              shopify_line_item_id: item.shopify_line_item_id,
+              order_item_business_key:
+                itemByLine.get(item.shopify_line_item_id)?.business_key ?? null,
+              quantity: item.quantity,
+            }))
+        )
+      );
   }
 
-  await replaceChildren(
-    "shopify_shipping_lines",
-    "shopify_order_id",
-    order.shopify_order_id,
-    "shopify_shipping_line_id",
-    order.shipping_lines.map((s) => ({
-      shopify_shipping_line_id: s.shopify_shipping_line_id,
-      shopify_order_id: order.shopify_order_id,
-      carrier_identifier: s.carrier_identifier,
-      code: s.code,
-      title: s.title,
-      price: s.price,
-      discounted_price: s.discounted_price,
-      is_removed: s.is_removed,
-      phone: s.phone,
-      source: s.source,
-    }))
+  await withPersistenceTiming("shipping_lines_replace", order.shopify_order_id, () =>
+    replaceChildren(
+      "shopify_shipping_lines",
+      "shopify_order_id",
+      order.shopify_order_id,
+      "shopify_shipping_line_id",
+      order.shipping_lines.map((s) => ({
+        shopify_shipping_line_id: s.shopify_shipping_line_id,
+        shopify_order_id: order.shopify_order_id,
+        carrier_identifier: s.carrier_identifier,
+        code: s.code,
+        title: s.title,
+        price: s.price,
+        discounted_price: s.discounted_price,
+        is_removed: s.is_removed,
+        phone: s.phone,
+        source: s.source,
+      }))
+    )
   );
 
   const refundRows = order.refunds.map((r) => ({
@@ -617,46 +691,52 @@ export async function persistNormalizedOrder(
     restock: r.restock,
     last_synced_at: now,
   }));
-  await replaceChildren(
-    "shopify_refunds",
-    "shopify_order_id",
-    order.shopify_order_id,
-    "shopify_refund_id",
-    refundRows
+  await withPersistenceTiming("refunds_replace", order.shopify_order_id, () =>
+    replaceChildren(
+      "shopify_refunds",
+      "shopify_order_id",
+      order.shopify_order_id,
+      "shopify_refund_id",
+      refundRows
+    )
   );
 
   for (const refund of order.refunds) {
-    await replaceChildren(
-      "shopify_refund_line_items",
-      "shopify_refund_id",
-      refund.shopify_refund_id,
-      "shopify_refund_line_item_id",
-      refund.line_items.map((li) => ({
-        shopify_refund_line_item_id: li.shopify_refund_line_item_id,
-        shopify_refund_id: refund.shopify_refund_id,
-        shopify_order_id: order.shopify_order_id,
-        shopify_line_item_id: li.shopify_line_item_id,
-        location_id: li.location_id,
-        quantity: li.quantity,
-        restock_type: li.restock_type,
-        subtotal: li.subtotal,
-        total_tax: li.total_tax,
-      }))
+    await withPersistenceTiming("refund_line_items_replace", order.shopify_order_id, () =>
+      replaceChildren(
+        "shopify_refund_line_items",
+        "shopify_refund_id",
+        refund.shopify_refund_id,
+        "shopify_refund_line_item_id",
+        refund.line_items.map((li) => ({
+          shopify_refund_line_item_id: li.shopify_refund_line_item_id,
+          shopify_refund_id: refund.shopify_refund_id,
+          shopify_order_id: order.shopify_order_id,
+          shopify_line_item_id: li.shopify_line_item_id,
+          location_id: li.location_id,
+          quantity: li.quantity,
+          restock_type: li.restock_type,
+          subtotal: li.subtotal,
+          total_tax: li.total_tax,
+        }))
+      )
     );
-    await replaceChildren(
-      "shopify_order_adjustments",
-      "shopify_refund_id",
-      refund.shopify_refund_id,
-      "shopify_adjustment_id",
-      refund.adjustments.map((adj) => ({
-        shopify_adjustment_id: adj.shopify_adjustment_id,
-        shopify_refund_id: refund.shopify_refund_id,
-        shopify_order_id: order.shopify_order_id,
-        amount: adj.amount,
-        tax_amount: adj.tax_amount,
-        kind: adj.kind,
-        reason: adj.reason,
-      }))
+    await withPersistenceTiming("order_adjustments_replace", order.shopify_order_id, () =>
+      replaceChildren(
+        "shopify_order_adjustments",
+        "shopify_refund_id",
+        refund.shopify_refund_id,
+        "shopify_adjustment_id",
+        refund.adjustments.map((adj) => ({
+          shopify_adjustment_id: adj.shopify_adjustment_id,
+          shopify_refund_id: refund.shopify_refund_id,
+          shopify_order_id: order.shopify_order_id,
+          amount: adj.amount,
+          tax_amount: adj.tax_amount,
+          kind: adj.kind,
+          reason: adj.reason,
+        }))
+      )
     );
   }
 
@@ -682,13 +762,21 @@ export async function persistNormalizedOrder(
     processed_at: t.processed_at,
     test: t.test,
   }));
-  await replaceChildren(
-    "shopify_transactions",
-    "shopify_order_id",
-    order.shopify_order_id,
-    "shopify_transaction_id",
-    transactionRows
+  await withPersistenceTiming("transactions_replace", order.shopify_order_id, () =>
+    replaceChildren(
+      "shopify_transactions",
+      "shopify_order_id",
+      order.shopify_order_id,
+      "shopify_transaction_id",
+      transactionRows
+    )
   );
+
+  logShopifyPersistenceDebug("Shopify order persistence finished", {
+    order_id: order.shopify_order_id,
+    inserted: !existed,
+    duration_ms: Date.now() - startedAt,
+  });
 
   return { inserted: !existed };
 }

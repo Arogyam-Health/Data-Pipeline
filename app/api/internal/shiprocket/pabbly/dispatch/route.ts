@@ -10,7 +10,7 @@ import { dispatchPendingDeliveries, processShiprocketEvent } from "@/modules/shi
  *
  * Protected by WORKER_SECRET or CRON_SECRET header.
  */
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 async function handleDispatch(request: NextRequest) {
   const authHeader = request.headers.get("authorization");

@@ -62,6 +62,10 @@ const shopifyEnvSchema = z.object({
     .min(1)
     .max(180)
     .default(DEFAULT_SYNC_INTERVAL_MINUTES),
+  SHOPIFY_SYNC_DEBUG: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
 });
 
 export type ShopifyEnv = z.infer<typeof shopifyEnvSchema>;

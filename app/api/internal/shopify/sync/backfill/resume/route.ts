@@ -2,7 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { authorizeInternalSync, runBackfill } from "@/modules/shopify";
 import { shopifyErrorResponse } from "@/modules/shopify/http";
 
-export async function POST(request: NextRequest) {
+export const maxDuration = 300;
+
+async function handleResume(request: NextRequest) {
   if (!authorizeInternalSync(request.headers.get("authorization"))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -24,4 +26,12 @@ export async function POST(request: NextRequest) {
   } catch (err) {
     return shopifyErrorResponse(err);
   }
+}
+
+export async function GET(request: NextRequest) {
+  return handleResume(request);
+}
+
+export async function POST(request: NextRequest) {
+  return handleResume(request);
 }

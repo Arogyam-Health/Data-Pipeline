@@ -5,7 +5,7 @@ export const DEFAULT_PAGE_SIZE = 100;
 export const DEFAULT_MAX_PAGE_SIZE = 250;
 /** Order list page size cap so a single GraphQL query stays under Shopify's 1000 cost. */
 export const LIST_ORDER_PAGE_SIZE = 25;
-export const LIST_NESTED_FIRST = 10;
+export const LIST_NESTED_FIRST = 20;
 export const DETAIL_NESTED_FIRST = 50;
 export const DEFAULT_TEST_FETCH_DAYS = 3;
 export const DEFAULT_BACKFILL_DAYS = 90;
