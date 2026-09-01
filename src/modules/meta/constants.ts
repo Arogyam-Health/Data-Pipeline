@@ -117,6 +117,7 @@ export const CAMPAIGN_FIELDS = [
   "updated_time",
   "daily_budget",
   "lifetime_budget",
+  "attribution_spec",
 ] as const;
 
 export const ADSET_FIELDS = [
@@ -132,6 +133,7 @@ export const ADSET_FIELDS = [
   "lifetime_budget",
   "start_time",
   "end_time",
+  "attribution_spec",
 ] as const;
 
 export const AD_FIELDS = [

@@ -59,24 +59,30 @@ export async function syncMetadata(
   await upsertCampaigns(
     campaigns
       .filter((row) => row.id)
-      .map((row) => ({
-        campaign_id: String(row.id),
-        ad_account_id: adAccountId,
-        name: row.name ?? null,
-        objective: row.objective ?? null,
-        status: row.status ?? null,
-        effective_status: row.effective_status ?? null,
-        buying_type: row.buying_type ?? null,
-        special_ad_categories: row.special_ad_categories ?? null,
-        start_time: row.start_time ?? null,
-        stop_time: row.stop_time ?? null,
-        created_time: row.created_time ?? null,
-        updated_time: row.updated_time ?? null,
-        daily_budget: row.daily_budget == null ? null : Number(row.daily_budget),
-        lifetime_budget: row.lifetime_budget == null ? null : Number(row.lifetime_budget),
-        last_synced_at: now,
-        updated_at: now,
-      }))
+      .map((row) => {
+        const spec = (row as any).attribution_spec as Array<{ event_type?: string; window_days?: number }> | undefined;
+        const setting = spec?.map((s) => `${s.window_days ?? "?"}-day ${s.event_type ?? "?"}`).join(", ") || null;
+        return {
+          campaign_id: String(row.id),
+          ad_account_id: adAccountId,
+          name: row.name ?? null,
+          objective: row.objective ?? null,
+          status: row.status ?? null,
+          effective_status: row.effective_status ?? null,
+          buying_type: row.buying_type ?? null,
+          special_ad_categories: row.special_ad_categories ?? null,
+          start_time: row.start_time ?? null,
+          stop_time: row.stop_time ?? null,
+          created_time: row.created_time ?? null,
+          updated_time: row.updated_time ?? null,
+          daily_budget: row.daily_budget == null ? null : Number(row.daily_budget),
+          lifetime_budget: row.lifetime_budget == null ? null : Number(row.lifetime_budget),
+          attribution_spec: spec ? JSON.stringify(spec) : null,
+          attribution_setting: setting,
+          last_synced_at: now,
+          updated_at: now,
+        };
+      })
   );
 
   const adsets = await client.getPaged<MetaAdsetNode>(`${adAccountId}/adsets`, {
@@ -86,23 +92,29 @@ export async function syncMetadata(
   await upsertAdsets(
     adsets
       .filter((row) => row.id && row.campaign_id)
-      .map((row) => ({
-        adset_id: String(row.id),
-        campaign_id: String(row.campaign_id),
-        ad_account_id: adAccountId,
-        name: row.name ?? null,
-        status: row.status ?? null,
-        effective_status: row.effective_status ?? null,
-        optimization_goal: row.optimization_goal ?? null,
-        billing_event: row.billing_event ?? null,
-        bid_strategy: row.bid_strategy ?? null,
-        daily_budget: row.daily_budget == null ? null : Number(row.daily_budget),
-        lifetime_budget: row.lifetime_budget == null ? null : Number(row.lifetime_budget),
-        start_time: row.start_time ?? null,
-        end_time: row.end_time ?? null,
-        last_synced_at: now,
-        updated_at: now,
-      }))
+      .map((row) => {
+        const spec = (row as any).attribution_spec as Array<{ event_type?: string; window_days?: number }> | undefined;
+        const setting = spec?.map((s) => `${s.window_days ?? "?"}-day ${s.event_type ?? "?"}`).join(", ") || null;
+        return {
+          adset_id: String(row.id),
+          campaign_id: String(row.campaign_id),
+          ad_account_id: adAccountId,
+          name: row.name ?? null,
+          status: row.status ?? null,
+          effective_status: row.effective_status ?? null,
+          optimization_goal: row.optimization_goal ?? null,
+          billing_event: row.billing_event ?? null,
+          bid_strategy: row.bid_strategy ?? null,
+          daily_budget: row.daily_budget == null ? null : Number(row.daily_budget),
+          lifetime_budget: row.lifetime_budget == null ? null : Number(row.lifetime_budget),
+          start_time: row.start_time ?? null,
+          end_time: row.end_time ?? null,
+          attribution_spec: spec ? JSON.stringify(spec) : null,
+          attribution_setting: setting,
+          last_synced_at: now,
+          updated_at: now,
+        };
+      })
   );
 
   const ads = await client.getPaged<MetaAdNode>(`${adAccountId}/ads`, {

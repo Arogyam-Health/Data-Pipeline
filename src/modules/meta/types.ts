@@ -273,6 +273,7 @@ export interface MetaCampaignNode {
   updated_time?: string;
   daily_budget?: string;
   lifetime_budget?: string;
+  attribution_spec?: Array<{ event_type?: string; window_days?: number }>;
 }
 
 export interface MetaAdsetNode {
@@ -288,6 +289,7 @@ export interface MetaAdsetNode {
   lifetime_budget?: string;
   start_time?: string;
   end_time?: string;
+  attribution_spec?: Array<{ event_type?: string; window_days?: number }>;
 }
 
 export interface MetaCreativeNode {

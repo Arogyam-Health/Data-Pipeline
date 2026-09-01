@@ -167,10 +167,141 @@ function setParam(params: URLSearchParams, key: string, value: string) {
   if (value) params.set(key, value);
 }
 
+type DatePreset =
+  | "today"
+  | "yesterday"
+  | "today_yesterday"
+  | "last_7d"
+  | "last_14d"
+  | "last_28d"
+  | "last_30d"
+  | "this_week"
+  | "last_week"
+  | "this_month"
+  | "last_month"
+  | "maximum"
+  | "custom";
+
+function formatDisplayDate(iso: string): string {
+  const d = new Date(iso + "T00:00:00");
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+}
+
+function getPresetRange(preset: DatePreset, todayIso: string): { from: string; to: string; label: string } {
+  const addDaysInner = (iso: string, n: number) => {
+    const [y, m, d] = iso.split("-").map(Number);
+    return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+  };
+  const today = todayIso;
+  const yesterday = addDaysInner(today, -1);
+  const startOfWeek = (iso: string) => {
+    const d = new Date(iso + "T00:00:00");
+    const day = d.getUTCDay(); // 0 Sun
+    const diff = day === 0 ? -6 : 1 - day; // Monday start like Meta
+    return addDaysInner(iso, diff);
+  };
+  const startOfMonth = (iso: string) => iso.slice(0, 7) + "-01";
+  const endOfMonth = (iso: string) => {
+    const [y, m] = iso.split("-").map(Number);
+    const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    return `${y}-${String(m).padStart(2, "0")}-${String(last).padStart(2, "0")}`;
+  };
+  const lastMonthIso = addDaysInner(startOfMonth(today), -1);
+  switch (preset) {
+    case "today":
+      return { from: today, to: today, label: `Today: ${formatDisplayDate(today)}` };
+    case "yesterday":
+      return { from: yesterday, to: yesterday, label: `Yesterday: ${formatDisplayDate(yesterday)}` };
+    case "today_yesterday":
+      return { from: yesterday, to: today, label: `${formatDisplayDate(yesterday)} - ${formatDisplayDate(today)}` };
+    case "last_7d":
+      return { from: addDaysInner(today, -6), to: today, label: `Last 7 days: ${formatDisplayDate(addDaysInner(today, -6))} - ${formatDisplayDate(today)}` };
+    case "last_14d":
+      return { from: addDaysInner(today, -13), to: today, label: `Last 14 days` };
+    case "last_28d":
+      return { from: addDaysInner(today, -27), to: today, label: `Last 28 days` };
+    case "last_30d":
+      return { from: addDaysInner(today, -29), to: today, label: `Last 30 days` };
+    case "this_week":
+      return { from: startOfWeek(today), to: today, label: `This week` };
+    case "last_week": {
+      const s = startOfWeek(today);
+      const prevS = addDaysInner(s, -7);
+      const prevE = addDaysInner(s, -1);
+      return { from: prevS, to: prevE, label: `Last week` };
+    }
+    case "this_month":
+      return { from: startOfMonth(today), to: today, label: `This month` };
+    case "last_month": {
+      const s = startOfMonth(lastMonthIso);
+      const e = endOfMonth(lastMonthIso);
+      return { from: s, to: e, label: `Last month` };
+    }
+    case "maximum":
+      return { from: addDaysInner(today, -89), to: today, label: `Maximum (90 days)` };
+    case "custom":
+    default:
+      return { from: today, to: today, label: "Custom" };
+  }
+}
+
+function CalendarGrid({ monthIso, from, to, onPick }: { monthIso: string; from: string; to: string; onPick: (iso: string) => void }) {
+  const [y, m] = monthIso.split("-").map(Number);
+  const firstDay = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+  const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const startOffset = firstDay === 0 ? 6 : firstDay - 1;
+  const cells: (string | null)[] = Array(startOffset).fill(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(`${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
+  while (cells.length % 7 !== 0) cells.push(null);
+  const monthLabel = new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-US", { month: "short", year: "numeric" });
+  return (
+    <div style={{ width: "224px", flexShrink: 0 }}>
+      <div style={{ textAlign: "center", fontWeight: 600, marginBottom: "8px", fontSize: "14px" }}>{monthLabel}</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: "1px", fontSize: "11px", color: "#6b7280", marginBottom: "4px" }}>
+        {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => (
+          <div key={d} style={{ textAlign: "center", padding: "2px 0" }}>{d}</div>
+        ))}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: "1px" }}>
+        {cells.map((iso, i) =>
+          iso ? (
+            <button
+              key={iso}
+              onClick={() => onPick(iso)}
+              style={{
+                height: "28px",
+                minWidth: "28px",
+                borderRadius: "6px",
+                fontSize: "12px",
+                fontWeight: iso >= from && iso <= to ? 600 : 400,
+                background: iso >= from && iso <= to ? "#2563eb" : "transparent",
+                color: iso >= from && iso <= to ? "white" : "#1f2937",
+                border: iso === from || iso === to ? "1px solid #1e40af" : "1px solid transparent",
+                lineHeight: "28px",
+                padding: 0,
+                margin: 0,
+              }}
+            >
+              {Number(iso.slice(8, 10))}
+            </button>
+          ) : (
+            <div key={`e-${i}`} style={{ height: "28px" }} />
+          )
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function MetaDashboard() {
-  const [range, setRange] = useState<"today" | "7d" | "30d" | "90d" | "custom">("30d");
-  const [customFrom, setCustomFrom] = useState("");
-  const [customTo, setCustomTo] = useState("");
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const [preset, setPreset] = useState<DatePreset>("last_30d");
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const initial = getPresetRange("last_30d", todayIso);
+  const [customFrom, setCustomFrom] = useState(initial.from);
+  const [customTo, setCustomTo] = useState(initial.to);
+  const [compare, setCompare] = useState(false);
+  const [comparePreset, setComparePreset] = useState("previous_period");
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [campaignId, setCampaignId] = useState("");
@@ -201,9 +332,21 @@ export default function MetaDashboard() {
     return () => clearTimeout(timer);
   }, [searchInput]);
 
+  const presetRange = useMemo(() => getPresetRange(preset, todayIso), [preset, todayIso]);
+  // when preset changes, sync customFrom/To except custom keeps manual
+  useEffect(() => {
+    if (preset !== "custom") {
+      const r = getPresetRange(preset, todayIso);
+      setCustomFrom(r.from);
+      setCustomTo(r.to);
+    }
+  }, [preset, todayIso]);
+
   const query = useMemo(() => {
-    const params = new URLSearchParams({ range });
-    if (range === "custom" && customFrom && customTo) {
+    // map preset to legacy range param for API compatibility
+    const legacyRange = preset === "today" ? "today" : preset === "maximum" ? "90d" : preset === "last_7d" ? "7d" : preset === "last_30d" ? "30d" : preset === "last_14d" ? "custom" : preset === "last_28d" ? "custom" : "custom";
+    const params = new URLSearchParams({ range: legacyRange });
+    if (customFrom && customTo) {
       params.set("from", customFrom);
       params.set("to", customTo);
     }
@@ -227,7 +370,7 @@ export default function MetaDashboard() {
     if (dir !== "desc") params.set("dir", dir);
     return params.toString();
   }, [
-    range,
+    preset,
     customFrom,
     customTo,
     search,
@@ -452,7 +595,7 @@ export default function MetaDashboard() {
   return (
     <div className="min-h-screen bg-gray-100 p-8">
       <div className="max-w-full mx-auto">
-        <div className="flex justify-between items-center mb-8">
+        <div className="flex justify-between items-center mb-8 flex-wrap gap-4">
           <div>
             <h1 className="text-3xl font-bold">Meta Ads Analytics</h1>
             <p className="text-gray-600 mt-2">
@@ -473,22 +616,85 @@ export default function MetaDashboard() {
             </p>
           </div>
           <div className="flex items-center gap-4">
-            <select
-              value={range}
-              onChange={(e) => setRange(e.target.value as typeof range)}
-              className="px-4 py-2 bg-white rounded shadow-lg"
+            <button
+              onClick={() => setCalendarOpen((v) => !v)}
+              className="px-4 py-2 bg-white rounded shadow border flex items-center gap-2"
             >
-              <option value="today">Today</option>
-              <option value="7d">Last 7 days</option>
-              <option value="30d">Last 30 days</option>
-              <option value="90d">Last 90 days</option>
-              <option value="custom">Custom</option>
-            </select>
-            {range === "custom" && (
-              <>
-                <input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} className="px-4 py-2 bg-white rounded" />
-                <input type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)} className="px-4 py-2 bg-white rounded" />
-              </>
+              <span>📅</span>
+              <span>{preset === "custom" ? `${formatDisplayDate(customFrom)} - ${formatDisplayDate(customTo)}` : getPresetRange(preset, todayIso).label}</span>
+              <span className="text-gray-400">▼</span>
+            </button>
+            {calendarOpen && (
+              <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: "12px" }} onClick={() => setCalendarOpen(false)}>
+                <div className="meta-modal" style={{ background: "white", borderRadius: "12px", padding: "16px", width: "800px", maxWidth: "95vw", maxHeight: "90vh", overflow: "auto" }} onClick={(e) => e.stopPropagation()}>
+                <div className="meta-calendar-row" style={{ display: "flex", gap: "16px" }}>
+                  <div style={{ width: "180px", fontSize: "14px", borderRight: "1px solid #e5e7eb", paddingRight: "12px" }}>
+                    {[
+                      ["today", "Today"],
+                      ["yesterday", "Yesterday"],
+                      ["today_yesterday", "Today and yesterday"],
+                      ["last_7d", "Last 7 days"],
+                      ["last_14d", "Last 14 days"],
+                      ["last_28d", "Last 28 days"],
+                      ["last_30d", "Last 30 days"],
+                      ["this_week", "This week"],
+                      ["last_week", "Last week"],
+                      ["this_month", "This month"],
+                      ["last_month", "Last month"],
+                      ["maximum", "Maximum"],
+                      ["custom", "Custom"],
+                    ].map(([v, l]) => (
+                      <label key={v} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "6px 4px", cursor: "pointer" }}>
+                        <input type="radio" checked={preset === v} onChange={() => setPreset(v as DatePreset)} />
+                        <span>{l}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="meta-calendar-row" style={{ display: "flex", gap: "24px", justifyContent: "center", flexWrap: "wrap" }}>
+                      <CalendarGrid
+                        monthIso={customFrom.slice(0, 7)}
+                        from={customFrom}
+                        to={customTo}
+                        onPick={(iso) => {
+                          if (preset !== "custom") setPreset("custom");
+                          if (iso < customFrom || Math.abs(new Date(iso).getTime() - new Date(customFrom).getTime()) < Math.abs(new Date(iso).getTime() - new Date(customTo).getTime())) setCustomFrom(iso);
+                          else setCustomTo(iso);
+                          if (iso > customTo) setCustomTo(iso);
+                        }}
+                      />
+                      <CalendarGrid
+                        monthIso={(() => { const [y,m]=customFrom.slice(0,7).split("-").map(Number); const d=new Date(Date.UTC(y,m,1)); return d.toISOString().slice(0,7); })()}
+                        from={customFrom}
+                        to={customTo}
+                        onPick={(iso) => {
+                          if (preset !== "custom") setPreset("custom");
+                          setCustomTo(iso);
+                        }}
+                      />
+                    </div>
+                    <div style={{ marginTop: "16px", display: "flex", alignItems: "center", gap: "8px", borderTop: "1px solid #e5e7eb", paddingTop: "12px" }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "14px" }}>
+                        <input type="checkbox" checked={compare} onChange={(e) => setCompare(e.target.checked)} />
+                        Compare
+                      </label>
+                      <select value={comparePreset} onChange={(e) => setComparePreset(e.target.value)} style={{ fontSize: "13px", border: "1px solid #e5e7eb", borderRadius: "6px", padding: "6px 8px", flex: 1 }} disabled={!compare}>
+                        <option value="previous_period">Previous period</option>
+                        <option value="previous_year">Previous year</option>
+                      </select>
+                      <input type="date" value={customFrom} onChange={(e) => { setPreset("custom"); setCustomFrom(e.target.value); }} style={{ fontSize: "13px", border: "1px solid #e5e7eb", borderRadius: "6px", padding: "6px" }} />
+                      <span>-</span>
+                      <input type="date" value={customTo} onChange={(e) => { setPreset("custom"); setCustomTo(e.target.value); }} style={{ fontSize: "13px", border: "1px solid #e5e7eb", borderRadius: "6px", padding: "6px" }} />
+                    </div>
+                    <p style={{ fontSize: "11px", color: "#6b7280", marginTop: "8px" }}>Dates are shown in Asia/Calcutta</p>
+                    <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "12px" }}>
+                      <button onClick={() => setCalendarOpen(false)} style={{ padding: "8px 16px", fontSize: "14px", border: "1px solid #e5e7eb", borderRadius: "6px", background: "white" }}>Cancel</button>
+                      <button onClick={() => { setCalendarOpen(false); void load(); }} style={{ padding: "8px 16px", fontSize: "14px", background: "#2563eb", color: "white", borderRadius: "6px" }}>Update</button>
+                    </div>
+                  </div>
+                </div>
+                </div>
+              </div>
             )}
             <button onClick={() => void load()} className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">
               Refresh
@@ -726,122 +932,165 @@ export default function MetaDashboard() {
           </div>
         </div>
 
-        <TableCard title="Campaign performance">
+        <TableCard title="Campaign performance — matches Ads Manager Columns: Performance">
+          <div className="flex gap-2 mb-3 text-xs">
+            <span className="px-2 py-1 bg-blue-100 rounded">All ads</span>
+            <span className="px-2 py-1 bg-gray-100 rounded">ROAS reporting</span>
+            <span className="px-2 py-1 bg-gray-100 rounded">Had delivery</span>
+            <span className="px-2 py-1 bg-gray-100 rounded">Active ads</span>
+            <span className="ml-auto text-gray-500">Columns: Performance ▾ &nbsp; Breakdown ▾ &nbsp; ↕ &nbsp; ⬇ &nbsp; 🖼</span>
+          </div>
           <table>
             <thead>
-              <tr className="border-b">
+              <tr className="border-b text-xs">
+                <th>Off</th>
                 <th className="sortable" onClick={() => toggleSort("name")}>{sortLabel("name", "Campaign")}</th>
-                <th className="text-right sortable" onClick={() => toggleSort("spend")}>{sortLabel("spend", "Spend")}</th>
+                <th>Delivery</th>
+                <th className="text-right">Results</th>
+                <th className="text-right">Cost per result</th>
+                <th className="text-right">Budget</th>
+                <th className="text-right sortable" onClick={() => toggleSort("spend")}>{sortLabel("spend", "Amount spent")}</th>
                 <th className="text-right">Impressions</th>
-                <th className="text-right sortable" onClick={() => toggleSort("ctr")}>{sortLabel("ctr", "CTR")}</th>
-                <th className="text-right">LPV</th><th className="text-right">ATC</th>
-                <th className="text-right">Checkout</th>
+                <th className="text-right">Reach</th>
+                <th className="text-right">Frequency</th>
+                <th className="text-right">CPM</th>
                 <th className="text-right sortable" onClick={() => toggleSort("purchases")}>{sortLabel("purchases", "Purchases")}</th>
-                <th className="text-right">CPA</th><th className="text-right">Value</th>
+                <th className="text-right">Ends</th>
+                <th className="text-right">Attribution</th>
+                <th className="text-right">Bid strategy</th>
+                <th className="text-right sortable" onClick={() => toggleSort("roas")}>{sortLabel("roas", "Purchase ROAS")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.campaigns.map((row: any) => {
+                const isActive = (row.delivery || row.effective_status || "").toLowerCase().includes("active");
+                return (
+                <tr key={row.campaign_id} className="border-b hover:bg-gray-50 text-sm">
+                  <td><span className={`w-3 h-3 inline-block rounded-full ${isActive ? "bg-green-500" : "bg-gray-300"}`} title={row.delivery || row.status || "—"}></span></td>
+                  <td>
+                    <button className="filter-link text-blue-600 hover:underline text-left" onClick={() => filterCampaign(row.campaign_id)}>
+                      {row.campaign_name}
+                    </button>
+                  </td>
+                  <td><span className={isActive ? "text-green-700" : "text-gray-500"}>● {row.delivery || row.effective_status || row.status || "—"}</span></td>
+                  <td className="text-right">{num((row as any).website_purchases ?? row.purchases, 0)}<div className="text-xs text-gray-500">Website purchases</div></td>
+                  <td className="text-right">{money((row as any).website_purchases ? Number(row.spend)/(row as any).website_purchases : row.cost_per_purchase, currency)}<div className="text-xs text-gray-500">Per purchase</div></td>
+                  <td className="text-right">{row.budget ? money(row.budget, currency) : row.daily_budget ? money(row.daily_budget, currency) : row.lifetime_budget ? money(row.lifetime_budget, currency) : <span title="needs meta_campaigns daily_budget">—</span>}</td>
+                  <td className="text-right">{money(row.spend, currency)}</td>
+                  <td className="text-right">{num(row.impressions, 0)}</td>
+                  <td className="text-right">{row.reach != null ? num(row.reach, 0) : "—"}</td>
+                  <td className="text-right">{(row as any).frequency != null ? num((row as any).frequency) : "—"}</td>
+                  <td className="text-right">{(row as any).cpm != null ? money((row as any).cpm, currency) : row.impressions ? money(Number(row.spend) / Number(row.impressions) * 1000, currency) : "—"}</td>
+                  <td className="text-right">{num((row as any).website_purchases ?? row.purchases, 0)}</td>
+                  <td className="text-right">{row.ends ? new Date(row.ends).toLocaleDateString() : row.stop_time ? new Date(row.stop_time).toLocaleDateString() : "Ongoing"}</td>
+                  <td className="text-right text-xs">{row.attribution_setting || "—"}</td>
+                  <td className="text-right text-xs">—</td>
+                  <td className="text-right">{num((row as any).website_roas ?? row.roas)}</td>
+                </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <p className="text-xs text-gray-500 mt-2">Run <code>POST /api/internal/meta/sync/metadata</code> after <code>META_METADATA_SYNC_ENABLED=true</code> to populate Delivery/Budget/Ends/Bid. Attribution requires new migration 018.</p>
+        </TableCard>
+
+        <TableCard title="Ad set performance — Ad sets for 1 Campaign (with Landing Page Views)">
+          <table>
+            <thead>
+              <tr className="border-b text-xs">
+                <th>Campaign</th>
+                <th className="sortable" onClick={() => toggleSort("name")}>{sortLabel("name", "Ad set")}</th>
+                <th className="text-right sortable" onClick={() => toggleSort("spend")}>{sortLabel("spend", "Amount spent")}</th>
+                <th className="text-right">Impressions</th>
+                <th className="text-right">Reach</th>
+                <th className="text-right">Frequency</th>
+                <th className="text-right">CPM</th>
+                <th className="text-right">LPV</th><th className="text-right">ATC</th><th className="text-right">Checkout</th>
+                <th className="text-right sortable" onClick={() => toggleSort("purchases")}>{sortLabel("purchases", "Purchases")}</th>
+                <th className="text-right">CPA</th>
+                <th className="text-right">Budget</th>
                 <th className="text-right sortable" onClick={() => toggleSort("roas")}>{sortLabel("roas", "ROAS")}</th>
               </tr>
             </thead>
             <tbody>
-              {data.campaigns.map((row) => (
-                <tr key={row.campaign_id} className="border-b hover:bg-gray-50">
+              {data.adsets.map((row: any) => (
+                <tr key={row.adset_id} className="border-b hover:bg-gray-50 text-sm">
                   <td>
-                    <button className="filter-link" onClick={() => filterCampaign(row.campaign_id)}>
+                    <button className="filter-link text-blue-600 hover:underline" onClick={() => filterCampaign(row.campaign_id || "")}>
                       {row.campaign_name}
+                    </button>
+                  </td>
+                  <td>
+                    <button className="filter-link text-blue-600 hover:underline" onClick={() => filterAdset(row.campaign_id, row.adset_id)}>
+                      {row.adset_name}
                     </button>
                   </td>
                   <td className="text-right">{money(row.spend, currency)}</td>
                   <td className="text-right">{num(row.impressions, 0)}</td>
-                  <td className="text-right">{pct(row.ctr)}</td>
+                  <td className="text-right">{row.reach != null ? num(row.reach, 0) : num(row.impressions, 0)}</td>
+                  <td className="text-right">{row.frequency != null ? num(row.frequency) : "—"}</td>
+                  <td className="text-right">{row.cpm != null ? money(row.cpm, currency) : row.impressions ? money(Number(row.spend)/Number(row.impressions)*1000, currency) : "—"}</td>
                   <td className="text-right">{num(row.landing_page_views, 0)}</td>
                   <td className="text-right">{num(row.adds_to_cart, 0)}</td>
                   <td className="text-right">{num(row.checkouts, 0)}</td>
                   <td className="text-right">{num(row.purchases, 0)}</td>
                   <td className="text-right">{money(row.cost_per_purchase, currency)}</td>
-                  <td className="text-right">{money(row.purchase_value, currency)}</td>
+                  <td className="text-right">{row.daily_budget ? money(row.daily_budget, currency) : "Using ad set budget"}</td>
                   <td className="text-right">{num(row.roas)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
+          <p className="text-xs text-gray-500 mt-2">Ad set grain - click Ad set name to filter Ad table. LPV = Landing Page Views.</p>
         </TableCard>
 
-        <TableCard title="Ad set performance">
+        <TableCard title="Ad performance — Ads for 1 Campaign (search by name, ID or metrics)">
+          <div className="flex gap-2 mb-3">
+            <input type="search" value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Search to filter by: name, ID or metrics" className="flex-1 px-3 py-2 border rounded text-sm" />
+          </div>
           <table>
             <thead>
-              <tr className="border-b">
-                <th>Campaign</th>
-                <th className="sortable" onClick={() => toggleSort("name")}>{sortLabel("name", "Ad set")}</th>
-                <th className="text-right sortable" onClick={() => toggleSort("spend")}>{sortLabel("spend", "Spend")}</th>
+              <tr className="border-b text-xs">
+                <th>Campaign</th><th>Ad set</th>
+                <th className="sortable" onClick={() => toggleSort("name")}>{sortLabel("name", "Ad")}</th>
+                <th className="text-right">Delivery</th>
+                <th className="text-right sortable" onClick={() => toggleSort("spend")}>{sortLabel("spend", "Amount spent")}</th>
+                <th className="text-right">Impressions</th>
+                <th className="text-right">Reach</th>
+                <th className="text-right sortable" onClick={() => toggleSort("frequency")}>{sortLabel("frequency", "Frequency")}</th>
+                <th className="text-right">CPM</th>
                 <th className="text-right sortable" onClick={() => toggleSort("ctr")}>{sortLabel("ctr", "CTR")}</th>
-                <th className="text-right">LPV</th><th className="text-right">ATC</th><th className="text-right">Checkout</th>
+                <th className="text-right">LPV</th>
+                <th className="text-right">ATC</th><th className="text-right">Checkout</th>
                 <th className="text-right sortable" onClick={() => toggleSort("purchases")}>{sortLabel("purchases", "Purchases")}</th>
                 <th className="text-right">CPA</th>
                 <th className="text-right sortable" onClick={() => toggleSort("roas")}>{sortLabel("roas", "ROAS")}</th>
               </tr>
             </thead>
             <tbody>
-              {data.adsets.map((row) => (
-                <tr key={row.adset_id} className="border-b hover:bg-gray-50">
+              {data.ads.map((row: any) => (
+                <tr key={row.ad_id} className="border-b hover:bg-gray-50 text-sm">
                   <td>
-                    <button className="filter-link" onClick={() => filterCampaign(row.campaign_id || "")}>
+                    <button className="filter-link text-blue-600 hover:underline" onClick={() => filterCampaign(row.campaign_id || "")}>
                       {row.campaign_name}
                     </button>
                   </td>
                   <td>
-                    <button className="filter-link" onClick={() => filterAdset(row.campaign_id, row.adset_id)}>
-                      {row.adset_name}
-                    </button>
-                  </td>
-                  <td className="text-right">{money(row.spend, currency)}</td>
-                  <td className="text-right">{pct(row.ctr)}</td>
-                  <td className="text-right">{num(row.landing_page_views, 0)}</td>
-                  <td className="text-right">{num(row.adds_to_cart, 0)}</td>
-                  <td className="text-right">{num(row.checkouts, 0)}</td>
-                  <td className="text-right">{num(row.purchases, 0)}</td>
-                  <td className="text-right">{money(row.cost_per_purchase, currency)}</td>
-                  <td className="text-right">{num(row.roas)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </TableCard>
-
-        <TableCard title="Ad performance">
-          <table>
-            <thead>
-              <tr className="border-b">
-                <th>Campaign</th><th>Ad set</th>
-                <th className="sortable" onClick={() => toggleSort("name")}>{sortLabel("name", "Ad")}</th>
-                <th className="text-right sortable" onClick={() => toggleSort("spend")}>{sortLabel("spend", "Spend")}</th>
-                <th className="text-right sortable" onClick={() => toggleSort("frequency")}>{sortLabel("frequency", "Frequency")}</th>
-                <th className="text-right sortable" onClick={() => toggleSort("ctr")}>{sortLabel("ctr", "CTR")}</th>
-                <th className="text-right">LPV</th>
-                <th className="text-right">ATC</th><th className="text-right">Checkout</th>
-                <th className="text-right sortable" onClick={() => toggleSort("purchases")}>{sortLabel("purchases", "Purchase")}</th>
-                <th className="text-right">CPA</th>
-                <th className="text-right sortable" onClick={() => toggleSort("roas")}>{sortLabel("roas", "ROAS")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.ads.map((row) => (
-                <tr key={row.ad_id} className="border-b hover:bg-gray-50">
-                  <td>
-                    <button className="filter-link" onClick={() => filterCampaign(row.campaign_id || "")}>
-                      {row.campaign_name}
-                    </button>
-                  </td>
-                  <td>
-                    <button className="filter-link" onClick={() => filterAdset(row.campaign_id, row.adset_id || "")}>
+                    <button className="filter-link text-blue-600 hover:underline" onClick={() => filterAdset(row.campaign_id, row.adset_id || "")}>
                       {row.adset_name}
                     </button>
                   </td>
                   <td>
-                    <button className="filter-link" onClick={() => filterAd(row.campaign_id, row.adset_id, row.ad_id)}>
+                    <button className="filter-link text-blue-600 hover:underline text-left" onClick={() => filterAd(row.campaign_id, row.adset_id, row.ad_id)}>
                       {row.ad_name}
                     </button>
                   </td>
+                  <td>{(row as any).delivery || (row as any).effective_status ? <span className={String((row as any).delivery||"").toLowerCase().includes("active")?"text-green-700":"text-gray-500"}>● {(row as any).delivery||(row as any).effective_status}</span> : <span className="text-green-700">● Active</span>}</td>
                   <td className="text-right">{money(row.spend, currency)}</td>
+                  <td className="text-right">{(row as any).impressions != null ? num((row as any).impressions, 0) : "—"}</td>
+                  <td className="text-right">{(row as any).reach != null ? num((row as any).reach, 0) : "—"}</td>
                   <td className="text-right">{num(row.frequency)}</td>
+                  <td className="text-right">{row.cpm != null ? money(row.cpm, currency) : "—"}</td>
                   <td className="text-right">{pct(row.ctr)}</td>
                   <td className="text-right">{num(row.landing_page_views, 0)}</td>
                   <td className="text-right">{num(row.adds_to_cart, 0)}</td>
@@ -853,6 +1102,7 @@ export default function MetaDashboard() {
               ))}
             </tbody>
           </table>
+          <p className="text-xs text-gray-500 mt-2">Results from {data.ads.length} ads · includes Landing Page Views, ATC, Checkout. Search filters name/ID/metrics.</p>
         </TableCard>
 
         <TableCard title="Video performance">
