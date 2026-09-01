@@ -22,11 +22,11 @@ function logShopifyPersistenceDebug(message: string, meta: Record<string, unknow
 async function withPersistenceTiming<T>(
   label: string,
   orderId: string,
-  fn: () => Promise<T>
+  fn: () => Promise<T> | T
 ): Promise<T> {
   const startedAt = Date.now();
   try {
-    const result = await fn();
+    const result = (await fn()) as T;
     logShopifyPersistenceDebug("Shopify persistence step finished", {
       order_id: orderId,
       step: label,
@@ -356,7 +356,7 @@ export async function persistNormalizedOrder(
 
   if (order.customer) {
     const { default_address, ...customer } = order.customer;
-    const { error } = await withPersistenceTiming(
+    const { error } = (await withPersistenceTiming(
       "customer_upsert",
       order.shopify_order_id,
       () =>
@@ -364,14 +364,15 @@ export async function persistNormalizedOrder(
           { ...customer, last_synced_at: now },
           { onConflict: "customer_id" }
         )
-    );
+    )) as { error: { message: string } | null };
     if (error) throw new Error(`customer upsert failed: ${error.message}`);
 
     if (default_address) {
+      const customerId = customer.customer_id;
       await withPersistenceTiming("customer_address_upsert", order.shopify_order_id, () =>
         client.from("shopify_customer_addresses").upsert(
           {
-            customer_id: order.customer.customer_id,
+            customer_id: customerId,
             customer_address_id: default_address.customer_address_id,
             is_default: true,
             address_key: default_address.address_key,
