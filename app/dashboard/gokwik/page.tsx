@@ -78,7 +78,10 @@ export default function GokwikDashboard() {
     const p = new URLSearchParams({ range });
     if (range === "custom" && customFrom && customTo) {
       p.set("from", new Date(customFrom).toISOString());
-      p.set("to", new Date(customTo).toISOString());
+      // inclusive end-of-day: same-day 2026-09-01→2026-09-01 must be 00:00 → 23:59:59.999
+      const toEnd = new Date(customTo);
+      toEnd.setUTCHours(23, 59, 59, 999);
+      p.set("to", toEnd.toISOString());
     }
     return p.toString();
   }, [range, customFrom, customTo]);

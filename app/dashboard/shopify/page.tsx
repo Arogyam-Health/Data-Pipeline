@@ -127,7 +127,9 @@ export default function ShopifyDashboard() {
     const params = new URLSearchParams({ range });
     if (range === "custom" && customFrom && customTo) {
       params.set("from", new Date(customFrom).toISOString());
-      params.set("to", new Date(customTo).toISOString());
+      const toEnd = new Date(customTo);
+      toEnd.setUTCHours(23, 59, 59, 999);
+      params.set("to", toEnd.toISOString());
     }
     return params.toString();
   }, [range, customFrom, customTo]);
