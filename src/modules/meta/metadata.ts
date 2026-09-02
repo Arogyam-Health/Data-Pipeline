@@ -1,6 +1,8 @@
 import { ACCOUNT_FIELDS, AD_FIELDS, ADSET_FIELDS, CAMPAIGN_FIELDS } from "./constants";
 import type { MetaGraphClient } from "./client";
 import { joinFields } from "./fields";
+
+const METADATA_PAGE_LIMIT = 100;
 import {
   upsertAccount,
   upsertAds,
@@ -54,7 +56,7 @@ export async function syncMetadata(
   const now = new Date().toISOString();
   const campaigns = await client.getPaged<MetaCampaignNode>(`${adAccountId}/campaigns`, {
     fields: joinFields(CAMPAIGN_FIELDS),
-    limit: String(client.env.META_PAGE_LIMIT),
+    limit: String(METADATA_PAGE_LIMIT),
   });
   await upsertCampaigns(
     campaigns
@@ -87,7 +89,7 @@ export async function syncMetadata(
 
   const adsets = await client.getPaged<MetaAdsetNode>(`${adAccountId}/adsets`, {
     fields: joinFields(ADSET_FIELDS),
-    limit: String(client.env.META_PAGE_LIMIT),
+    limit: String(METADATA_PAGE_LIMIT),
   });
   await upsertAdsets(
     adsets
@@ -119,7 +121,7 @@ export async function syncMetadata(
 
   const ads = await client.getPaged<MetaAdNode>(`${adAccountId}/ads`, {
     fields: joinFields(AD_FIELDS),
-    limit: String(client.env.META_PAGE_LIMIT),
+    limit: String(METADATA_PAGE_LIMIT),
   });
 
   const creatives = new Map<string, MetaCreativeNode>();
