@@ -32,7 +32,7 @@ create index if not exists idx_shiprocket_orders_awb
 -- ============================================================
 -- Main Day 3 view: data_pipeline.shopify_order_delivery_remittance
 -- ============================================================
-create or replace view data_pipeline.shopify_order_delivery_remittance as
+create or replace view data_pipeline.shopify_order_delivery_remittance with (security_invoker = true) as
 with
 -- 1. Day 2 attribution as base (already one-row-per-order)
 day2 as (
@@ -72,12 +72,12 @@ shiprocket_canonical as (
     e.order_id_shopify_format,
     e.customer_name_shopify,
     e.customer_phone_shopify,
-    -- Derived buckets (from 027_shiprocket_order_360 status_bucket / payment_bucket)
+    -- Derived buckets (from 027, fixed: UNDELIVERED must not match DELIVERED)
     case
       when coalesce(o.shipment_status,'') ilike '%rto%' or coalesce(o.current_status,'') ilike '%rto%' then 'rto'
-      when coalesce(o.shipment_status,'') ilike '%ndr%'  or coalesce(o.current_status,'') ilike '%ndr%'  then 'ndr'
+      when coalesce(o.shipment_status,'') ilike '%ndr%' or coalesce(o.current_status,'') ilike '%ndr%' or lower(coalesce(o.shipment_status,'')) = 'undelivered' or lower(coalesce(o.current_status,'')) = 'undelivered' then 'ndr'
       when coalesce(o.shipment_status,'') ilike '%out for delivery%' or coalesce(o.current_status,'') ilike '%out for delivery%' then 'out_for_delivery'
-      when coalesce(o.shipment_status,'') ilike '%delivered%' or coalesce(o.current_status,'') ilike '%delivered%' then 'delivered'
+      when lower(coalesce(o.shipment_status,'')) = 'delivered' or lower(coalesce(o.current_status,'')) = 'delivered' or o.shipment_status_id = '7' or o.current_status_id = '7' then 'delivered'
       when coalesce(o.shipment_status,'') ilike '%transit%' or coalesce(o.current_status,'') ilike '%transit%' then 'in_transit'
       else 'other'
     end as status_bucket,
@@ -233,17 +233,17 @@ with_delivery as (
       when p.shiprocket_status_raw ilike '%cancelled%' or p.shiprocket_current_status_raw ilike '%canceled%' or p.shiprocket_order_status = 'new' then 'CANCELLED'
       when p.shiprocket_status_raw ilike '%rto delivered%' or p.shiprocket_current_status_raw ilike '%rto delivered%' then 'RTO'
       when p.shiprocket_status_raw ilike '%rto%' or p.shiprocket_current_status_raw ilike '%rto%' then 'RTO'
-      when p.shiprocket_status_raw ilike '%delivered%' or p.shiprocket_current_status_raw ilike '%delivered%' then 'DELIVERED'
-      when p.shiprocket_status_raw ilike '%ndr%' or p.shiprocket_current_status_raw ilike '%ndr%' or p.shiprocket_status_raw = 'UNDELIVERED' or p.shiprocket_current_status_raw = 'UNDELIVERED' then 'NDR_OPEN'
+      when lower(coalesce(p.shiprocket_status_raw,'')) = 'undelivered' or lower(coalesce(p.shiprocket_current_status_raw,'')) = 'undelivered' or p.shiprocket_status_raw ilike '%ndr%' or p.shiprocket_current_status_raw ilike '%ndr%' then 'NDR_OPEN'
+      when lower(coalesce(p.shiprocket_status_raw,'')) = 'delivered' or lower(coalesce(p.shiprocket_current_status_raw,'')) = 'delivered' or p.shiprocket_status_id = '7' or p.shiprocket_current_status_id = '7' then 'DELIVERED'
       when p.shiprocket_status_bucket = 'out_for_delivery' then 'IN_TRANSIT'
       when p.shiprocket_status_bucket in ('in_transit','other') and p.shiprocket_awb is not null then 'IN_TRANSIT'
       when p.shiprocket_awb is not null then 'IN_TRANSIT'
       else 'UNKNOWN'
     end as delivery_outcome,
     (p.shiprocket_match_status = 'MATCHED' and p.shiprocket_awb is not null) as is_shipped,
-    ((p.shiprocket_status_raw ilike '%delivered%' or p.shiprocket_current_status_raw ilike '%delivered%') and p.shiprocket_match_status = 'MATCHED' and not (p.shiprocket_status_raw ilike '%rto delivered%')) as is_delivered,
+    ((lower(coalesce(p.shiprocket_status_raw,'')) = 'delivered' or lower(coalesce(p.shiprocket_current_status_raw,'')) = 'delivered' or p.shiprocket_status_id = '7' or p.shiprocket_current_status_id = '7') and p.shiprocket_match_status = 'MATCHED' and not (p.shiprocket_status_raw ilike '%rto delivered%')) as is_delivered,
     (p.shiprocket_status_raw ilike '%rto%' or p.shiprocket_current_status_raw ilike '%rto%') as is_rto,
-    (p.shiprocket_status_raw ilike '%ndr%' or p.shiprocket_current_status_raw ilike '%ndr%' or p.shiprocket_status_raw = 'UNDELIVERED') as is_ndr,
+    (lower(coalesce(p.shiprocket_status_raw,'')) = 'undelivered' or lower(coalesce(p.shiprocket_current_status_raw,'')) = 'undelivered' or p.shiprocket_status_raw ilike '%ndr%' or p.shiprocket_current_status_raw ilike '%ndr%') as is_ndr,
     (p.shiprocket_status_raw ilike '%cancelled%' or p.shiprocket_current_status_raw ilike '%canceled%') as is_cancelled,
     case when p.shiprocket_delivered_date_raw ~ '^\d{4}-\d{2}-\d{2}' then p.shiprocket_delivered_date_raw::timestamptz else null end as delivered_at,
     case when p.shiprocket_awb_assigned_date_raw ~ '^\d{4}-\d{2}-\d{2}' then p.shiprocket_awb_assigned_date_raw::timestamptz else null end as shipped_at,
@@ -400,7 +400,7 @@ from with_delivery;
 grant select on data_pipeline.shopify_order_delivery_remittance to service_role, authenticated;
 grant usage on schema data_pipeline to service_role, authenticated;
 
-create or replace view analytics.shopify_order_delivery_remittance as
+create or replace view analytics.shopify_order_delivery_remittance with (security_invoker = true) as
 select * from data_pipeline.shopify_order_delivery_remittance;
 
 grant select on analytics.shopify_order_delivery_remittance to service_role, authenticated;

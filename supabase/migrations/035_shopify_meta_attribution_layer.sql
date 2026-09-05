@@ -21,8 +21,9 @@ create index if not exists idx_shopify_note_attributes_order_name_lower
 
 -- ============================================================
 -- Main attribution view: data_pipeline.shopify_meta_attribution
+-- Fix linter: use security_invoker (was Security Definer, exposed via APIs)
 -- ============================================================
-create or replace view data_pipeline.shopify_meta_attribution as
+create or replace view data_pipeline.shopify_meta_attribution with (security_invoker = true) as
 with order_utm as (
   -- ONE ROW PER SHOPIFY ORDER — validated Day 1 pattern
   select
@@ -258,8 +259,8 @@ from with_names;
 grant select on data_pipeline.shopify_meta_attribution to service_role, authenticated;
 grant usage on schema data_pipeline to service_role, authenticated;
 
--- Friendly analytics alias (optional, mirrors data_pipeline view)
-create or replace view analytics.shopify_meta_attribution as
+-- Friendly analytics alias (optional, mirrors data_pipeline view) — also security_invoker
+create or replace view analytics.shopify_meta_attribution with (security_invoker = true) as
 select * from data_pipeline.shopify_meta_attribution;
 
 grant select on analytics.shopify_meta_attribution to service_role, authenticated;

@@ -5,6 +5,70 @@ import Link from "next/link";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import "./shiprocket-dashboard.css";
 
+type DatePreset = "today" | "yesterday" | "last_7d" | "last_14d" | "last_28d" | "last_30d" | "this_week" | "last_week" | "this_month" | "last_month" | "maximum" | "custom";
+function formatDisplayDate(iso: string): string {
+  const d = new Date(iso + "T00:00:00");
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+}
+function getPresetRange(preset: DatePreset, todayIso: string): { from: string; to: string; label: string } {
+  const addDays = (iso: string, n: number) => {
+    const [y, m, d] = iso.split("-").map(Number);
+    return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+  };
+  const today = todayIso;
+  const yesterday = addDays(today, -1);
+  const startOfWeek = (iso: string) => {
+    const d = new Date(iso + "T00:00:00");
+    const day = d.getUTCDay();
+    const diff = day === 0 ? -6 : 1 - day;
+    return addDays(iso, diff);
+  };
+  const startOfMonth = (iso: string) => iso.slice(0, 7) + "-01";
+  const endOfMonth = (iso: string) => {
+    const [y, m] = iso.split("-").map(Number);
+    const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    return `${y}-${String(m).padStart(2, "0")}-${String(last).padStart(2, "0")}`;
+  };
+  const lastMonthIso = addDays(startOfMonth(today), -1);
+  switch (preset) {
+    case "today": return { from: today, to: today, label: `Today: ${formatDisplayDate(today)}` };
+    case "yesterday": return { from: yesterday, to: yesterday, label: `Yesterday: ${formatDisplayDate(yesterday)}` };
+    case "last_7d": return { from: addDays(today, -6), to: today, label: `Last 7 days` };
+    case "last_14d": return { from: addDays(today, -13), to: today, label: `Last 14 days` };
+    case "last_28d": return { from: addDays(today, -27), to: today, label: `Last 28 days` };
+    case "last_30d": return { from: addDays(today, -29), to: today, label: `Last 30 days` };
+    case "this_week": return { from: startOfWeek(today), to: today, label: `This week` };
+    case "last_week": { const s = startOfWeek(today); return { from: addDays(s, -7), to: addDays(s, -1), label: `Last week` }; }
+    case "this_month": return { from: startOfMonth(today), to: today, label: `This month` };
+    case "last_month": { const s = startOfMonth(lastMonthIso); return { from: s, to: endOfMonth(lastMonthIso), label: `Last month` }; }
+    case "maximum": return { from: addDays(today, -89), to: today, label: `Maximum (90 days)` };
+    default: return { from: today, to: today, label: "Custom" };
+  }
+}
+function CalendarGrid({ monthIso, from, to, onPick }: { monthIso: string; from: string; to: string; onPick: (iso: string) => void }) {
+  const [y, m] = monthIso.split("-").map(Number);
+  const firstDay = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+  const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const startOffset = firstDay === 0 ? 6 : firstDay - 1;
+  const cells: (string | null)[] = Array(startOffset).fill(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(`${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
+  while (cells.length % 7 !== 0) cells.push(null);
+  const monthLabel = new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-US", { month: "short", year: "numeric" });
+  return (
+    <div style={{ width: "224px", flexShrink: 0 }}>
+      <div style={{ textAlign: "center", fontWeight: 600, marginBottom: "8px", fontSize: "14px" }}>{monthLabel}</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: "1px", fontSize: "11px", color: "#6b7280", marginBottom: "4px" }}>
+        {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => (<div key={d} style={{ textAlign: "center", padding: "2px 0" }}>{d}</div>))}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: "1px" }}>
+        {cells.map((iso, i) => iso ? (
+          <button key={iso} onClick={() => onPick(iso)} style={{ height: "28px", borderRadius: "6px", fontSize: "12px", fontWeight: iso >= from && iso <= to ? 600 : 400, background: iso >= from && iso <= to ? "#2563eb" : "transparent", color: iso >= from && iso <= to ? "white" : "#1f2937", border: iso === from || iso === to ? "1px solid #1e40af" : "1px solid transparent" }}>{Number(iso.slice(8, 10))}</button>
+        ) : (<div key={`e-${i}`} style={{ height: "28px" }} />))}
+      </div>
+    </div>
+  );
+}
+
 interface FilterField {
   key: string;
   label: string;
@@ -218,6 +282,11 @@ export default function ShiprocketDashboardPage() {
   const [importResult, setImportResult] = useState<string>("");
   const columnPopoverRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const [preset, setPreset] = useState<DatePreset>("maximum");
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [customFrom, setCustomFrom] = useState(() => getPresetRange("maximum", new Date().toISOString().slice(0, 10)).from);
+  const [customTo, setCustomTo] = useState(() => getPresetRange("maximum", new Date().toISOString().slice(0, 10)).to);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 350);
@@ -259,16 +328,24 @@ export default function ShiprocketDashboardPage() {
       .catch(() => undefined);
   }, []);
 
-  const payload = useMemo(
-    () => ({
-      filters: appliedFilters,
+  useEffect(() => {
+    if (preset !== "custom") {
+      const r = getPresetRange(preset, todayIso);
+      setCustomFrom(r.from);
+      setCustomTo(r.to);
+    }
+  }, [preset, todayIso]);
+
+  const payload = useMemo(() => {
+    const dateFilter = preset === "maximum" ? [] : [{ field: "last_webhook_sync_at", operator: "between", value: [customFrom, customTo] as unknown as string[] }];
+    return {
+      filters: [...appliedFilters, ...dateFilter],
       search: debouncedSearch,
       page,
       pageSize,
       sort: [{ field: sortField, direction: sortDir }],
-    }),
-    [appliedFilters, debouncedSearch, page, pageSize, sortField, sortDir]
-  );
+    };
+  }, [appliedFilters, debouncedSearch, page, pageSize, sortField, sortDir, preset, customFrom, customTo]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -553,15 +630,8 @@ export default function ShiprocketDashboardPage() {
                 placeholder="Search orders, AWB, customer, CRF, UTR…"
                 className="sr-search"
               />
-              <button
-                type="button"
-                className="sr-btn sr-btn-secondary"
-                onClick={() => {
-                  setPage(1);
-                  setAppliedFilters([{ field: "last_webhook_sync_at", operator: "last_30_days" }]);
-                }}
-              >
-                Date Range: 30 days
+              <button type="button" onClick={() => setCalendarOpen((v) => !v)} className="sr-btn sr-btn-secondary">
+                📅 {preset === "custom" ? `${formatDisplayDate(customFrom)} - ${formatDisplayDate(customTo)}` : getPresetRange(preset, todayIso).label} ▼
               </button>
               <button
                 type="button"
@@ -605,6 +675,52 @@ export default function ShiprocketDashboardPage() {
             )}
           </div>
         </section>
+
+        {calendarOpen && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: "12px" }} onClick={() => setCalendarOpen(false)}>
+            <div style={{ background: "white", borderRadius: "12px", padding: "16px", width: "820px", maxWidth: "95vw", maxHeight: "90vh", overflow: "auto" }} onClick={(e) => e.stopPropagation()}>
+              <div style={{ display: "flex", gap: "16px" }}>
+                <div style={{ width: "180px", fontSize: "14px", borderRight: "1px solid #e5e7eb", paddingRight: "12px" }}>
+                  {[
+                    ["today", "Today"],
+                    ["yesterday", "Yesterday"],
+                    ["last_7d", "Last 7 days"],
+                    ["last_14d", "Last 14 days"],
+                    ["last_28d", "Last 28 days"],
+                    ["last_30d", "Last 30 days"],
+                    ["this_week", "This week"],
+                    ["last_week", "Last week"],
+                    ["this_month", "This month"],
+                    ["last_month", "Last month"],
+                    ["maximum", "Maximum"],
+                    ["custom", "Custom"],
+                  ].map(([v, l]) => (
+                    <label key={v} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "6px 4px", cursor: "pointer" }}>
+                      <input type="radio" checked={preset === v} onChange={() => setPreset(v as DatePreset)} />
+                      <span>{l}</span>
+                    </label>
+                  ))}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "24px", alignItems: "center" }}>
+                    <CalendarGrid monthIso={customFrom.slice(0, 7)} from={customFrom} to={customTo} onPick={(iso) => { if (preset !== "custom") setPreset("custom"); if (iso < customFrom || Math.abs(new Date(iso).getTime() - new Date(customFrom).getTime()) < Math.abs(new Date(iso).getTime() - new Date(customTo).getTime())) setCustomFrom(iso); else setCustomTo(iso); if (iso > customTo) setCustomTo(iso); }} />
+                    <CalendarGrid monthIso={(() => { const [y, m] = customFrom.slice(0, 7).split("-").map(Number); const d = new Date(Date.UTC(y, m, 1)); return d.toISOString().slice(0, 7); })()} from={customFrom} to={customTo} onPick={(iso) => { if (preset !== "custom") setPreset("custom"); setCustomTo(iso); }} />
+                  </div>
+                  <div style={{ marginTop: "16px", display: "flex", alignItems: "center", gap: "8px", borderTop: "1px solid #e5e7eb", paddingTop: "12px" }}>
+                    <input type="date" value={customFrom} onChange={(e) => { setPreset("custom"); setCustomFrom(e.target.value); }} style={{ fontSize: "13px", border: "1px solid #e5e7eb", borderRadius: "6px", padding: "6px" }} />
+                    <span>-</span>
+                    <input type="date" value={customTo} onChange={(e) => { setPreset("custom"); setCustomTo(e.target.value); }} style={{ fontSize: "13px", border: "1px solid #e5e7eb", borderRadius: "6px", padding: "6px" }} />
+                  </div>
+                  <p style={{ fontSize: "11px", color: "#6b7280", marginTop: "8px" }}>Dates filter awb_assigned_date (shipment date) behind Basic Auth</p>
+                  <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "12px" }}>
+                    <button onClick={() => setCalendarOpen(false)} style={{ padding: "8px 16px", fontSize: "14px", border: "1px solid #e5e7eb", borderRadius: "6px", background: "white" }}>Cancel</button>
+                    <button onClick={() => { setCalendarOpen(false); setPage(1); }} style={{ padding: "8px 16px", fontSize: "14px", background: "#2563eb", color: "white", borderRadius: "6px" }}>Update</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {error && <div className="sr-alert sr-alert-error">{error}</div>}
         {loading && !overview && <p className="sr-loading">Loading dashboard…</p>}
