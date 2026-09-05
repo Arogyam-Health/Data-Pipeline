@@ -497,10 +497,20 @@ export async function importRemittanceWorkbook(options: {
   }
 
   try {
-    const { data: orders } = await supabase
-      .from("shiprocket_orders")
-      .select("sr_order_id, awb, order_id");
-    const canonicalOrders = orders || [];
+    // Paginated fetch — default PostgREST limit is 1000, so loop to get all 2357+
+    const canonicalOrders: Array<{ sr_order_id: string; awb: string | null; order_id: string | null }> = [];
+    let offset = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from("shiprocket_orders")
+        .select("sr_order_id, awb, order_id")
+        .range(offset, offset + 999);
+      if (error) throw new Error(error.message);
+      if (!data || data.length === 0) break;
+      canonicalOrders.push(...(data as any[]));
+      if (data.length < 1000) break;
+      offset += 1000;
+    }
     const index = indexOrdersForRemittanceMatch(canonicalOrders);
     const sampleUnmatched: RemittanceMatchDiagnostic[] = [];
 

@@ -247,14 +247,23 @@ export async function queryShiprocketOverview(
   request: ShiprocketFilterRequest
 ): Promise<ShiprocketOverview & { truncated: boolean }> {
   const supabase = getSupabaseClient();
-  let query = supabase.from("shiprocket_order_explorer").select(OVERVIEW_COLUMNS);
-  query = applyAllClauses(query, request);
-  const { data, error } = await query.limit(20000);
-  if (error) throw new Error(`Shiprocket overview failed: ${error.message}`);
-  const rows = data || [];
+  const batchSize = 1000;
+  let offset = 0;
+  const allRows: OverviewRowInput[] = [];
+  while (true) {
+    let query = supabase.from("shiprocket_order_explorer").select(OVERVIEW_COLUMNS).range(offset, offset + batchSize - 1);
+    query = applyAllClauses(query, request);
+    const { data, error } = await query;
+    if (error) throw new Error(`Shiprocket overview failed: ${error.message}`);
+    if (!data || data.length === 0) break;
+    allRows.push(...(data as OverviewRowInput[]));
+    if (data.length < batchSize) break;
+    offset += batchSize;
+    if (allRows.length >= 20000) break;
+  }
   return {
-    ...computeOverviewFromRows(rows as OverviewRowInput[]),
-    truncated: rows.length >= 20000,
+    ...computeOverviewFromRows(allRows as OverviewRowInput[]),
+    truncated: allRows.length >= 20000,
   };
 }
 
