@@ -49,7 +49,7 @@ import {
   sortRows,
   toRpcFilters,
 } from "../modules/meta/filters";
-import { dashboardRangeSchema, parseMetaFilters } from "../modules/meta/http";
+import { dashboardRangeSchema, parseMetaFilters, resolveDashboardDateRange } from "../modules/meta/http";
 import { parseRetryAfterMs } from "../modules/meta/retry";
 import type { MetaInsightRow } from "../modules/meta/types";
 
@@ -384,6 +384,17 @@ describe("Meta date windows and backfill chunking", () => {
     expect(formatDateInTimeZone(now, "Asia/Kolkata")).toBe("2026-08-25");
   });
 
+  it("resolves the Meta reporting day at the account-local midnight", () => {
+    const now = new Date("2026-09-06T18:40:00.000Z");
+    expect(formatDateInTimeZone(now, "Asia/Kolkata")).toBe("2026-09-07");
+    expect(getTodayRange("Asia/Kolkata", now)).toEqual({ since: "2026-09-07", until: "2026-09-07" });
+  });
+
+  it("does not let a supplied range override explicit custom dates", () => {
+    expect(resolveDashboardDateRange({ range: "today", from: "2026-09-07", to: "2026-09-07", timeZone: "Asia/Kolkata" }))
+      .toEqual({ from: "2026-09-07", to: "2026-09-07" });
+  });
+
   it("treats recent repair daysBack=2 as three calendar dates", () => {
     const range = getRecentRepairRange(2, tz, now);
     expect(range.since).toBe("2026-08-23");
@@ -596,4 +607,3 @@ describe("Meta dashboard filters", () => {
     expect(grouped.objectives[0].id).toBe("OUTCOME_SALES");
   });
 });
-

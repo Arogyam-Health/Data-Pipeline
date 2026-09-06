@@ -97,15 +97,31 @@ interface Overview {
   rto: number;
   ndr: number;
   deliveryRate: number;
-  codOrders: number;
-  prepaidOrders: number;
-  totalOrderValue: number;
+  codOrders: number | null;
+  prepaidOrders: number | null;
+  totalOrderValue: number | null;
   settledOrders: number;
   unmatchedRemittanceOrders: number;
   remittanceAmountOnLatestCrf: number;
   orderSettlementValue: number;
+  settlementAmountAvailable: boolean;
   distinctCrfs: number;
   distinctUtrs: number;
+  remittanceDataAvailable: boolean;
+  remittanceStatus: string;
+  remittanceRowsTotal: number;
+  remittanceMatched: number;
+  remittanceUnmatched: number;
+  remittanceMatchRate: number | null;
+  deliveredCodOrders: number;
+  deliveredRemittedOrders: number;
+  deliveredNotRemittedOrders: number;
+  remittedNotDeliveredOrders: number;
+  deliveredOrdersWithRemittance?: number;
+  deliveredOrdersWithoutRemittance?: number;
+  paymentUnknownOrders?: number;
+  commercialDataAvailable: boolean;
+  commercialSource: string;
   shopifyMatchPct: number;
   phoneCoveragePct: number;
   pabblySent?: number;
@@ -142,6 +158,7 @@ const DEFAULT_COLUMNS = [
   "pabbly_sent_at",
   "latest_crf_id",
   "latest_utr",
+  "reconciliation_status",
 ];
 
 const MONO_COLUMNS = new Set([
@@ -363,8 +380,8 @@ export default function ShiprocketDashboardPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         }),
-        fetch("/api/shiprocket/quality", { credentials: "include" }),
-        fetch("/api/shiprocket/remittances", { credentials: "include" }),
+        fetch("/api/shiprocket/quality", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }),
+        fetch("/api/shiprocket/remittances", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }),
       ]);
       const ordersBody = await ordersRes.json();
       const overviewBody = await overviewRes.json();
@@ -528,18 +545,9 @@ export default function ShiprocketDashboardPage() {
         {
           title: "Commercial",
           cards: [
-            { label: "COD", value: overview.codOrders },
-            { label: "Prepaid", value: overview.prepaidOrders },
-            { label: "Order Value", value: money(overview.totalOrderValue) },
-          ],
-        },
-        {
-          title: "Settlement",
-          cards: [
-            { label: "Settled Orders", value: overview.settledOrders },
-            { label: "Settlement Value", value: money(overview.orderSettlementValue) },
-            { label: "CRFs", value: overview.distinctCrfs },
-            { label: "UTRs", value: overview.distinctUtrs },
+            { label: "COD", value: overview.commercialDataAvailable ? overview.codOrders : "NOT AVAILABLE" },
+            { label: "Prepaid", value: overview.commercialDataAvailable ? overview.prepaidOrders : "NOT AVAILABLE" },
+            { label: "Order Value", value: overview.commercialDataAvailable ? money(overview.totalOrderValue) : "NOT AVAILABLE" },
           ],
         },
         {
@@ -547,6 +555,7 @@ export default function ShiprocketDashboardPage() {
           cards: [
             { label: "Shopify Match", value: `${overview.shopifyMatchPct}%` },
             { label: "Phone Coverage", value: `${overview.phoneCoveragePct}%` },
+            { label: "Remittance", value: overview.remittanceStatus.replaceAll("_", " ") },
           ],
         },
         {
@@ -771,16 +780,17 @@ export default function ShiprocketDashboardPage() {
                   <p className="sr-mini-metric-value">{dash(quality?.shopify_unmatched)}</p>
                 </div>
                 <div>
-                  <p className="sr-mini-metric-label">Remittance matched</p>
-                  <p className="sr-mini-metric-value">{dash(remittanceQuality?.matched)}</p>
+                  <p className="sr-mini-metric-label">Remittance reconciliation</p>
+                  <p className="sr-mini-metric-value">{String(remittanceQuality?.status || "NO_REMITTANCE_DATA").replaceAll("_", " ")}</p>
                 </div>
-                <div>
-                  <p className="sr-mini-metric-label">Remittance unmatched</p>
-                  <p className="sr-mini-metric-value">{dash(remittanceQuality?.unmatched)}</p>
-                </div>
+                {Boolean(remittanceQuality?.data_available) && <>
+                  <div><p className="sr-mini-metric-label">Remittance matched</p><p className="sr-mini-metric-value">{dash(remittanceQuality?.matched)}</p></div>
+                  <div><p className="sr-mini-metric-label">Remittance unmatched</p><p className="sr-mini-metric-value">{dash(remittanceQuality?.unmatched)}</p></div>
+                  <div><p className="sr-mini-metric-label">Remittance match rate</p><p className="sr-mini-metric-value">{remittanceQuality?.match_rate == null ? "NOT AVAILABLE" : `${remittanceQuality.match_rate}%`}</p></div>
+                </>}
               </div>
               <p className="sr-subtitle" style={{ marginBottom: "0.75rem" }}>
-                Official remittance API not verified. Upload Shiprocket Billing XLS/XLSX report.
+                {remittanceQuality?.data_available ? "Actual remittance rows for the selected scope." : "No remittance file covers the selected period. Upload a Shiprocket Billing / CRF-UTR XLS/XLSX report to enable reconciliation."}
               </p>
               <div className="sr-import-row">
                 <input
@@ -829,8 +839,25 @@ export default function ShiprocketDashboardPage() {
         </section>
 
         {/* CRF settlements */}
+        {overview?.remittanceDataAvailable && (
+          <section className="sr-section">
+            <div className="sr-card">
+              <h3 className="sr-card-title">Universal delivery reconciliation</h3>
+              <p className="sr-subtitle">Remittance matching is independent of payment classification.</p>
+              <div className="sr-mini-metrics">
+                <div><p className="sr-mini-metric-label">Delivered orders</p><p className="sr-mini-metric-value">{overview.delivered}</p></div>
+                <div><p className="sr-mini-metric-label">Delivered + remitted</p><p className="sr-mini-metric-value">{overview.deliveredOrdersWithRemittance ?? overview.deliveredRemittedOrders}</p></div>
+                <div><p className="sr-mini-metric-label">Delivered + not remitted</p><p className="sr-mini-metric-value">{overview.deliveredOrdersWithoutRemittance ?? overview.deliveredNotRemittedOrders}</p></div>
+                <div><p className="sr-mini-metric-label">Remitted but not delivered</p><p className="sr-mini-metric-value">{overview.remittedNotDeliveredOrders}</p></div>
+              </div>
+            </div>
+          </section>
+        )}
+
         <section className="sr-section">
           <h2 className="sr-section-title">Settlements</h2>
+          {!overview?.remittanceDataAvailable ? <div className="sr-card sr-empty-state"><h3 className="sr-card-title">No remittance data available for this period</h3><p className="sr-subtitle">Shipment and delivery data are available. Upload a Shiprocket Billing / CRF-UTR XLS/XLSX report covering the selected period to enable COD settlement reconciliation.</p><div className="sr-import-row"><button type="button" className="sr-btn sr-btn-secondary" disabled={importing} onClick={() => fileInputRef.current?.click()}>Choose File</button><button type="button" className="sr-btn sr-btn-primary" disabled={importing} onClick={() => fileInputRef.current?.click()}>{importing ? "Importing…" : "Import"}</button></div></div> : <div className="sr-card"><h3 className="sr-card-title">Settlement summary</h3><div className="sr-mini-metrics"><div><p className="sr-mini-metric-label">Remittance rows</p><p className="sr-mini-metric-value">{overview.remittanceRowsTotal}</p></div><div><p className="sr-mini-metric-label">Matched rows</p><p className="sr-mini-metric-value">{overview.remittanceMatched}</p></div><div><p className="sr-mini-metric-label">Unmatched rows</p><p className="sr-mini-metric-value">{overview.remittanceUnmatched}</p></div><div><p className="sr-mini-metric-label">CRFs / UTRs</p><p className="sr-mini-metric-value">{overview.distinctCrfs} / {overview.distinctUtrs}</p></div><div><p className="sr-mini-metric-label">Settlement value</p><p className="sr-mini-metric-value">{overview.settlementAmountAvailable ? money(overview.orderSettlementValue) : "NOT AVAILABLE"}</p></div></div><h3 className="sr-card-title" style={{ marginTop: "1rem" }}>Delivery reconciliation</h3><div className="sr-mini-metrics"><div><p className="sr-mini-metric-label">Delivered COD</p><p className="sr-mini-metric-value">{overview.deliveredCodOrders}</p></div><div><p className="sr-mini-metric-label">Delivered + remitted</p><p className="sr-mini-metric-value">{overview.deliveredRemittedOrders}</p></div><div><p className="sr-mini-metric-label">Delivered + not remitted</p><p className="sr-mini-metric-value">{overview.deliveredNotRemittedOrders}</p></div><div><p className="sr-mini-metric-label">Remitted but not delivered</p><p className="sr-mini-metric-value">{overview.remittedNotDeliveredOrders}</p></div></div></div>}
+          {overview?.remittanceDataAvailable &&
           <div className="sr-card">
             <h3 className="sr-card-title">CRF Settlements</h3>
             {crfSummary.crfCount > 0 && (
@@ -846,8 +873,12 @@ export default function ShiprocketDashboardPage() {
                     <th>UTR</th>
                     <th>Date</th>
                     <th>Status</th>
+                    <th>Reconciliation</th>
                     <th className="sr-num">Amount</th>
                     <th className="sr-num">AWBs</th>
+                    <th className="sr-num">Matched</th>
+                    <th className="sr-num">Delivered</th>
+                    <th className="sr-num">Not delivered</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -881,21 +912,25 @@ export default function ShiprocketDashboardPage() {
                       <td>
                         <span className={statusBadgeClass(row.status)}>{dash(row.status)}</span>
                       </td>
-                      <td className="sr-num">{money(row.remittance_amount)}</td>
+                      <td>{Number(row.matched || 0) === Number(row.awb_count || 0) && Number(row.awb_count || 0) > 0 ? "FULLY RECONCILED" : Number(row.matched || 0) === 0 ? "UNMATCHED" : "PARTIALLY RECONCILED"}</td>
+                      <td className="sr-num">{row.settlement_amount == null || row.settlement_amount === "" ? "NOT AVAILABLE" : money(row.settlement_amount)}</td>
                       <td className="sr-num">{dash(row.awb_count)}</td>
+                      <td className="sr-num">{dash(row.matched)}</td>
+                      <td className="sr-num">{dash(row.delivered)}</td>
+                      <td className="sr-num">{dash(row.not_delivered)}</td>
                     </tr>
                   ))}
                   {(remittances?.crfs || []).length === 0 && (
                     <tr>
-                      <td colSpan={6} className="sr-muted" style={{ textAlign: "center" }}>
-                        No CRF settlements imported yet.
+                      <td colSpan={10} className="sr-muted" style={{ textAlign: "center" }}>
+                        No remittance data available for this period. Upload a Shiprocket Billing / CRF-UTR report to enable settlement reconciliation.
                       </td>
                     </tr>
                   )}
                 </tbody>
               </table>
             </div>
-          </div>
+          </div>}
         </section>
 
         {/* Orders */}

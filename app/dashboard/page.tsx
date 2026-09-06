@@ -4,6 +4,11 @@ import Link from "next/link";
 
 const SOURCES = [
   {
+    href: "/dashboard/journey",
+    title: "Customer Journey & Profitability",
+    body: "Meta attribution → Shopify order → shipment outcome → COD remittance, with campaign and ad drill-down.",
+  },
+  {
     href: "/dashboard/shiprocket",
     title: "Shiprocket",
     body: "Orders, scans, Shopify enrichment, remittance/UTR, filters, and data quality.",

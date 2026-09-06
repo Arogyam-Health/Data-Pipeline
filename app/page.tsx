@@ -11,6 +11,15 @@ export default function Home() {
         
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <Link
+            href="/dashboard/journey"
+            className="block p-6 bg-white rounded-lg shadow-lg hover:shadow-xl transition-shadow"
+          >
+            <h2 className="text-xl font-semibold mb-2">🧭 Customer Journey</h2>
+            <p className="text-gray-600">
+              Trace every Shopify order from acquisition through delivery and remittance, and inspect delivered ROAS.
+            </p>
+          </Link>
+          <Link
             href="/dashboard"
             className="block p-6 bg-white rounded-lg shadow-lg hover:shadow-xl transition-shadow"
           >

@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { getEnv } from "@/config/env";
+import { getSupabaseClient } from "@/lib/supabase/admin";
 import { DASHBOARD_MAX_PAGE_SIZE } from "./constants";
 import { getAccount } from "./repository";
 import { getMetaEnv } from "./env";
@@ -105,7 +106,27 @@ export async function loadMetaCampaigns(range: MetaDateRange, filters: MetaFilte
     range,
     filters
   );
-  return sortRows(rows as Array<Record<string, unknown>>, filters.sort, filters.dir);
+  const campaignRows = rows as Array<Record<string, unknown>>;
+  // Older deployed RPCs may omit metadata columns even though the canonical
+  // metadata table has them. Enrich by campaign id so status is not silently
+  // rendered as a blank when the API supplied it during metadata sync.
+  const ids = campaignRows.map((row) => String(row.campaign_id ?? "")).filter(Boolean);
+  if (ids.length) {
+    const { data } = await getSupabaseClient()
+      .from("meta_campaigns")
+      .select("campaign_id,status,effective_status,daily_budget,lifetime_budget,stop_time,attribution_setting")
+      .in("campaign_id", ids);
+    const byId = new Map((data ?? []).map((row) => [String(row.campaign_id), row as Record<string, unknown>]));
+    for (const row of campaignRows) {
+      const meta = byId.get(String(row.campaign_id));
+      if (!meta) continue;
+      for (const key of ["status", "effective_status", "daily_budget", "lifetime_budget", "stop_time", "attribution_setting"]) {
+        if (row[key] == null && meta[key] != null) row[key] = meta[key];
+      }
+      if (row.delivery == null) row.delivery = meta.effective_status ?? meta.status ?? null;
+    }
+  }
+  return sortRows(campaignRows, filters.sort, filters.dir);
 }
 
 export async function loadMetaAdsets(range: MetaDateRange, filters: MetaFilters = {}) {

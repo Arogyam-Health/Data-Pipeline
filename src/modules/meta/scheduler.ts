@@ -27,6 +27,17 @@ export async function runScheduledTodaySync(): Promise<boolean> {
   g.__metaInFlight = true;
   try {
     const result = await runMetaSync({ mode: "today", requireEnabled: true });
+    // Keep campaign delivery/budget/schedule fields fresh alongside insights.
+    // This is part of the scheduled sync, so the dashboard does not depend on
+    // a developer remembering to POST the metadata endpoint manually.
+    try {
+      await runMetaSync({ mode: "metadata", requireEnabled: true });
+    } catch (err) {
+      logger.warn("Meta metadata sync failed after today sync", {
+        provider: INTEGRATION,
+        error: sanitizeMetaError(err instanceof Error ? err.message : "metadata sync failed"),
+      });
+    }
     logger.info("Meta scheduled today sync finished", {
       provider: INTEGRATION,
       status: result.status,

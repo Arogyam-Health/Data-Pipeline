@@ -28,7 +28,9 @@ export function proxy(request: NextRequest) {
     pathname.startsWith("/dashboard/ga4") ||
     pathname.startsWith("/api/ga4") ||
     pathname.startsWith("/dashboard/shiprocket") ||
-    pathname.startsWith("/api/shiprocket");
+    pathname.startsWith("/api/shiprocket") ||
+    pathname.startsWith("/dashboard/journey") ||
+    pathname.startsWith("/api/journey");
 
   if (!needsDashboardAuth) {
     return NextResponse.next();
@@ -73,5 +75,8 @@ export const config = {
     "/dashboard/shiprocket",
     "/dashboard/shiprocket/:path*",
     "/api/shiprocket/:path*",
+    "/dashboard/journey",
+    "/dashboard/journey/:path*",
+    "/api/journey/:path*",
   ],
 };

@@ -182,13 +182,20 @@ function readSheetAsTextRows(sheet: XLSX.WorkSheet): Record<string, string>[] {
 }
 
 function headerKey(value: unknown): string {
-  return String(value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+  return String(value ?? "").replace(/[\s_-]+/g, " ").trim().toLowerCase();
 }
 
+const HEADER_ALIASES: Record<string, string[]> = {
+  "order id": ["order id", "order identifier", "order number"],
+  "remittance amount": ["remittance amount", "settlement amount", "cod settlement amount"],
+  "total adjusted amt": ["total adjusted amt", "total adjusted amount", "adjusted amount"],
+  "remittance type": ["remittance type", "remmitance type"],
+};
+
 function cell(row: Record<string, unknown>, header: string): string {
-  const want = headerKey(header);
+  const want = HEADER_ALIASES[headerKey(header)] || [headerKey(header)];
   for (const [key, value] of Object.entries(row)) {
-    if (headerKey(key) === want) {
+    if (want.includes(headerKey(key))) {
       if (value == null) return "";
       return String(value).trim();
     }
@@ -240,7 +247,7 @@ function assertHeaders(rows: Record<string, unknown>[], required: readonly strin
     throw new Error(`${sheet} has no data rows`);
   }
   const present = new Set(Object.keys(rows[0] || {}).map(headerKey));
-  const missing = required.filter((header) => !present.has(headerKey(header)));
+  const missing = required.filter((header) => !(HEADER_ALIASES[headerKey(header)] || [headerKey(header)]).some((alias) => present.has(alias)));
   if (missing.length > 0) {
     throw new Error(`${sheet} missing headers: ${missing.join(", ")}`);
   }

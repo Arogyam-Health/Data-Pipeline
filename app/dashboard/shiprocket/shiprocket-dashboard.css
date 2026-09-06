@@ -911,3 +911,7 @@
 .sr-collapsed-panel-open {
   display: block;
 }
+.sr-empty-state {
+  border: 1px dashed #cbd5e1;
+  background: #f8fafc;
+}

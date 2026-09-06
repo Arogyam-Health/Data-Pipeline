@@ -8,10 +8,25 @@ import {
 } from "./filters";
 import { buildLegacyPabblyPayload, LEGACY_PABBLY_HEADERS } from "./legacy";
 import { SHIPROCKET_EXPLORER_COLUMNS } from "./explorer-contract";
-import { computeOverviewFromRows, type OverviewRowInput, type ShiprocketOverview } from "./status";
+import { classifyShiprocketStatus, computeOverviewFromRows, type OverviewRowInput, type ShiprocketOverview } from "./status";
 import type { ShiprocketExplorerRow } from "./types";
 
 const LIST_COLUMNS = SHIPROCKET_EXPLORER_COLUMNS.join(",");
+
+function canonicalDelivered(row: Record<string, unknown>): boolean {
+  return (row.status_bucket ? row.status_bucket : classifyShiprocketStatus(String(row.shipment_status || ""), String(row.current_status || ""))) === "delivered";
+}
+
+export function reconciliationStatus(row: Record<string, unknown>): string {
+  const remitted = row.remittance_match_status === "matched";
+  const payment = String(row.payment_bucket || "").toUpperCase();
+  if (payment === "PREPAID") return "NOT_APPLICABLE_PREPAID";
+  if (!payment && !String(row.payment_method || "").trim()) return remitted ? "UNKNOWN_PAYMENT" : "PENDING";
+  const cod = payment === "COD" || /cod/i.test(String(row.payment_method || ""));
+  if (!cod) return remitted ? "UNKNOWN_PAYMENT" : "NOT_APPLICABLE_PREPAID";
+  if (canonicalDelivered(row)) return remitted ? "DELIVERED_REMITTED" : "DELIVERED_NOT_REMITTED";
+  return remitted ? "REMITTED_NOT_DELIVERED" : "PENDING";
+}
 
 const OVERVIEW_COLUMNS = [
   "sr_order_id",
@@ -35,6 +50,89 @@ const OVERVIEW_COLUMNS = [
   "pabbly_sent_count",
   "pabbly_failed_count",
 ].join(",");
+
+function requestDateRange(request: ShiprocketFilterRequest): [string | null, string | null] {
+  for (const filter of request.filters || []) {
+    if (!("field" in filter)) continue;
+    if (filter.field !== "last_webhook_sync_at" && filter.field !== "awb_assigned_date" && filter.field !== "order_date") continue;
+    if (filter.operator === "between" && Array.isArray(filter.value)) return [String(filter.value[0] || "").slice(0, 10) || null, String(filter.value[1] || "").slice(0, 10) || null];
+    if (["on", "after", "before", "gte", "lte"].includes(filter.operator)) {
+      const day = String(filter.value || "").slice(0, 10);
+      return filter.operator === "after" || filter.operator === "gte" ? [day, null] : [null, day];
+    }
+  }
+  return [null, null];
+}
+
+async function scopedRemittanceStats(request: ShiprocketFilterRequest, srOrderIds: string[]) {
+  const supabase = getSupabaseClient();
+  const rows = await loadScopedRemittanceRows(request, srOrderIds);
+  const matched = rows.filter((row) => row.match_status === "matched").length;
+  const unmatched = rows.filter((row) => row.match_status !== "matched").length;
+  const crfs = new Set(rows.map((row) => row.crf_id).filter(Boolean));
+  const utrs = new Set(rows.map((row) => row.utr).filter(Boolean));
+  let settlementValue = rows.filter((row) => row.match_status === "matched").reduce((sum, row) => sum + Number(row.total_adjusted_amt || 0), 0);
+  let settlementAmountAvailable = rows.some((row) => row.match_status === "matched" && row.total_adjusted_amt != null && row.total_adjusted_amt !== "");
+  if (settlementValue === 0) {
+    const crfIds = [...new Set(rows.map((row) => row.crf_id).filter(Boolean))];
+    if (crfIds.length) {
+      const { data: parents } = await supabase.from("shiprocket_remittances").select("crf_id,remittance_amount").in("crf_id", crfIds);
+      settlementValue = (parents || []).reduce((sum, row) => sum + Number(row.remittance_amount || 0), 0);
+      settlementAmountAvailable = settlementAmountAvailable || (parents || []).some((row) => row.remittance_amount != null && row.remittance_amount !== "");
+    }
+  }
+  return {
+    available: rows.length > 0,
+    status: rows.length === 0 ? "NO_REMITTANCE_DATA" : matched > 0 && unmatched > 0 ? "PARTIAL_REMITTANCE_DATA" : "RECONCILIATION_AVAILABLE",
+    rowsTotal: rows.length, matched, unmatched,
+    matchRate: rows.length ? Math.round((matched / rows.length) * 1000) / 10 : null,
+    crfCount: crfs.size, utrCount: utrs.size,
+    settlementValue,
+    settlementAmountAvailable,
+    matchedSrIds: new Set(rows.filter((row) => row.match_status === "matched" && row.matched_sr_order_id).map((row) => String(row.matched_sr_order_id).trim())),
+  };
+}
+
+async function loadScopedRemittanceRows(request: ShiprocketFilterRequest, srOrderIds: string[]) {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("shiprocket_remittance_orders")
+    .select("id,crf_id,utr,awb,order_id,remittance_date,total_adjusted_amt,match_status,matched_sr_order_id")
+    .limit(20000);
+  if (error) throw new Error(`Remittance scope query failed: ${error.message}`);
+  const canonicalId = (value: unknown) => String(value ?? "").trim();
+  const selected = new Set(srOrderIds.map(canonicalId).filter(Boolean));
+  const [from, to] = requestDateRange(request);
+  const inDate = (value: unknown) => {
+    if (!from && !to) return true;
+    if (!value) return false;
+    const day = String(value).slice(0, 10);
+    return (!from || day >= from) && (!to || day <= to);
+  };
+  return (data || []).filter((row) => {
+    // Matched rows follow the operational Shiprocket cohort. This preserves
+    // remittance received after the order/delivery date and NULL source dates.
+    if (row.matched_sr_order_id && selected.has(canonicalId(row.matched_sr_order_id))) return true;
+    // Unmatched source rows have no order to join; date-scope them when a
+    // dashboard date is selected so they remain visible as exceptions.
+    return !row.matched_sr_order_id && inDate(row.remittance_date);
+  });
+}
+
+async function filteredShiprocketIds(request: ShiprocketFilterRequest): Promise<string[]> {
+  const supabase = getSupabaseClient();
+  const ids: string[] = [];
+  for (let offset = 0; offset < 20000; offset += 1000) {
+    let query = supabase.from("shiprocket_order_explorer").select("sr_order_id").range(offset, offset + 999);
+    // Keep the generated Supabase builder from expanding recursively here.
+    query = applyAllClauses(query as any, request) as any;
+    const { data, error } = await query;
+    if (error) throw new Error(`Shiprocket cohort query failed: ${error.message}`);
+    ids.push(...(data || []).map((row) => String(row.sr_order_id)).filter(Boolean));
+    if (!data || data.length < 1000) break;
+  }
+  return ids;
+}
 
 type FilterBuilder = {
   eq: (col: string, val: unknown) => FilterBuilder;
@@ -197,7 +295,7 @@ export async function queryShiprocketOrders(request: ShiprocketFilterRequest): P
   }
 
   return {
-    rows: (data || []) as unknown as ShiprocketExplorerRow[],
+    rows: (data as unknown as Array<Record<string, unknown>> || []).map((row) => ({ ...row, reconciliation_status: reconciliationStatus(row) })) as unknown as ShiprocketExplorerRow[],
     total: count ?? 0,
     page: request.page,
     pageSize: request.pageSize,
@@ -261,51 +359,117 @@ export async function queryShiprocketOverview(
     offset += batchSize;
     if (allRows.length >= 20000) break;
   }
+  const shopifyIds = [...new Set(allRows.map((row) => row.shopify_order_identifier).filter(Boolean).map(String))];
+  const shopify = new Map<string, { current_total_price: number | null; payment_category: string | null }>();
+  for (let offset = 0; offset < shopifyIds.length; offset += 500) {
+    const ids = shopifyIds.slice(offset, offset + 500);
+    const { data, error } = await supabase.from("shopify_orders").select("shopify_order_id,current_total_price,payment_gateway_names").in("shopify_order_id", ids);
+    if (error) throw new Error(`Shopify commercial enrichment failed: ${error.message}`);
+    for (const row of data || []) {
+      const gateways = (row.payment_gateway_names || []).map((value: string) => value.toLowerCase()).join(" ");
+      const payment_category = /cash_on_delivery|cash on delivery|(^|[^a-z])cod([^a-z]|$)|(^|[^a-z])cash([^a-z]|$)/.test(gateways)
+        ? "COD" : gateways ? "PREPAID" : "UNKNOWN";
+      shopify.set(String(row.shopify_order_id), { current_total_price: row.current_total_price, payment_category });
+    }
+  }
+  const enrichedRows = allRows.map((row) => ({ ...row, ...(shopify.get(String(row.shopify_order_identifier || "")) ? { shopify_current_total_price: shopify.get(String(row.shopify_order_identifier))?.current_total_price, shopify_payment_category: shopify.get(String(row.shopify_order_identifier))?.payment_category } : {}) }));
+  const overview = computeOverviewFromRows(enrichedRows as OverviewRowInput[]);
+  const remittance = await scopedRemittanceStats(request, allRows.map((row) => String(row.sr_order_id)).filter(Boolean));
+  const isDelivered = (row: OverviewRowInput) => canonicalDelivered(row as Record<string, unknown>);
+  const isCod = (row: OverviewRowInput) => row.shopify_payment_category ? row.shopify_payment_category === "COD" : row.payment_bucket === "COD" || /cod/i.test(String(row.payment_method || ""));
+  const deliveredRows = enrichedRows.filter((row) => isDelivered(row));
+  const deliveredCodRows = deliveredRows.filter((row) => isCod(row));
+  // Remittance evidence is independent of payment classification. Unknown
+  // payment must not erase a valid delivered/remitted match.
+  const deliveredRemitted = deliveredRows.filter((row) => remittance.matchedSrIds.has(String(row.sr_order_id).trim())).length;
+  const deliveredCodRemitted = deliveredCodRows.filter((row) => remittance.matchedSrIds.has(String(row.sr_order_id).trim())).length;
+  const remittedNotDelivered = [...remittance.matchedSrIds].filter((id) => !enrichedRows.some((row) => String(row.sr_order_id).trim() === id && isDelivered(row))).length;
   return {
-    ...computeOverviewFromRows(allRows as OverviewRowInput[]),
+    ...overview,
+    remittanceDataAvailable: remittance.available,
+    remittanceStatus: remittance.status as typeof overview.remittanceStatus,
+    remittanceRowsTotal: remittance.rowsTotal,
+    remittanceUnmatched: remittance.unmatched,
+    remittanceMatchRate: remittance.matchRate,
+    settledOrders: deliveredRemitted,
+    unmatchedRemittanceOrders: remittance.unmatched,
+    distinctCrfs: remittance.crfCount,
+    distinctUtrs: remittance.utrCount,
+    orderSettlementValue: remittance.settlementValue,
+    settlementAmountAvailable: remittance.settlementAmountAvailable,
+    remittanceMatched: remittance.matched,
+    deliveredCodOrders: deliveredCodRows.length,
+    deliveredRemittedOrders: deliveredCodRemitted,
+    deliveredNotRemittedOrders: Math.max(0, deliveredCodRows.length - deliveredCodRemitted),
+    remittedNotDeliveredOrders: remittedNotDelivered,
+    deliveredOrdersWithRemittance: deliveredRemitted,
+    deliveredOrdersWithoutRemittance: Math.max(0, deliveredRows.length - deliveredRemitted),
+    paymentUnknownOrders: deliveredRows.filter((row) => !row.shopify_payment_category && !String(row.payment_bucket || "").trim() && !String(row.payment_method || "").trim()).length,
     truncated: allRows.length >= 20000,
   };
 }
 
-export async function queryShiprocketRemittances(): Promise<{
+export async function queryShiprocketRemittances(request: ShiprocketFilterRequest = { filters: [], search: "", page: 1, pageSize: 1, sort: [] }): Promise<{
   summary: Record<string, unknown> | null;
   crfs: Record<string, unknown>[];
   imports: Record<string, unknown>[];
 }> {
   const supabase = getSupabaseClient();
-  const [summary, crfs, imports] = await Promise.all([
-    supabase.from("shiprocket_remittances").select("*").order("remittance_date", { ascending: false }).limit(200),
-    supabase.from("shiprocket_remittance_orders").select("crf_id, match_status, awb"),
+  const [selectedIds, imports] = await Promise.all([
+    filteredShiprocketIds(request),
     supabase
       .from("shiprocket_remittance_imports")
       .select("id, file_name, file_hash, source, awb_rows_read, awb_rows_upserted, crf_rows_read, crf_rows_upserted, matched_orders, unmatched_orders, ambiguous_orders, status, started_at, completed_at")
       .order("created_at", { ascending: false })
       .limit(10),
   ]);
+  const scopedRows = await loadScopedRemittanceRows(request, selectedIds);
+  const crfIds = [...new Set(scopedRows.map((row) => row.crf_id).filter(Boolean))];
+  const awbAmountByCrf = new Map<string, number>();
+  for (const row of scopedRows) {
+    if (!row.crf_id || row.total_adjusted_amt == null || row.total_adjusted_amt === "") continue;
+    const amount = Number(row.total_adjusted_amt);
+    if (Number.isFinite(amount)) awbAmountByCrf.set(String(row.crf_id), (awbAmountByCrf.get(String(row.crf_id)) || 0) + amount);
+  }
+  const [{ data: summaryRows, error: summaryError }] = await Promise.all([
+    crfIds.length ? supabase.from("shiprocket_remittances").select("*").in("crf_id", crfIds).order("remittance_date", { ascending: false }) : Promise.resolve({ data: [], error: null }),
+  ]);
+  if (summaryError) throw new Error(`Remittance CRF query failed: ${summaryError.message}`);
+  const crfRows = scopedRows;
 
-  const crfStats = new Map<string, { awb_count: number; matched: number; unmatched: number; ambiguous: number }>();
-  for (const row of crfs.data || []) {
-    const current = crfStats.get(row.crf_id) ?? { awb_count: 0, matched: 0, unmatched: 0, ambiguous: 0 };
+  const deliveryBySr = new Map<string, boolean>();
+  const matchedSrIds = [...new Set(scopedRows.filter((row) => row.matched_sr_order_id).map((row) => String(row.matched_sr_order_id)))];
+  for (let offset = 0; offset < matchedSrIds.length; offset += 500) {
+    const ids = matchedSrIds.slice(offset, offset + 500);
+    const { data, error } = await supabase.from("shiprocket_order_explorer").select("sr_order_id,status_bucket,shipment_status,current_status").in("sr_order_id", ids);
+    if (error) throw new Error(`Remittance delivery reconciliation failed: ${error.message}`);
+    for (const row of data || []) deliveryBySr.set(String(row.sr_order_id), row.status_bucket === "delivered" || (/delivered/i.test(`${row.shipment_status || ""} ${row.current_status || ""}`) && !/rto/i.test(`${row.shipment_status || ""} ${row.current_status || ""}`)));
+  }
+  const crfStats = new Map<string, { awb_count: number; matched: number; unmatched: number; ambiguous: number; delivered: number; not_delivered: number }>();
+  for (const row of crfRows || []) {
+    const current = crfStats.get(row.crf_id) ?? { awb_count: 0, matched: 0, unmatched: 0, ambiguous: 0, delivered: 0, not_delivered: 0 };
     current.awb_count += 1;
     if (row.match_status === "matched") current.matched += 1;
     else if (row.match_status === "ambiguous") current.ambiguous += 1;
     else current.unmatched += 1;
+    if (row.match_status === "matched") deliveryBySr.get(String(row.matched_sr_order_id)) ? current.delivered += 1 : current.not_delivered += 1;
     crfStats.set(row.crf_id, current);
   }
 
   return {
     summary: {
-      crf_count: (summary.data || []).length,
-      distinct_utrs: new Set((summary.data || []).map((row) => row.utr).filter(Boolean)).size,
-      remittance_amount_total: (summary.data || []).reduce(
-        (sum, row) => sum + Number(row.remittance_amount || 0),
+      crf_count: (summaryRows || []).length,
+      distinct_utrs: new Set((scopedRows || []).map((row) => row.utr).filter(Boolean)).size,
+      remittance_amount_total: (summaryRows || []).reduce(
+        (sum, row) => sum + Number(row.remittance_amount != null && row.remittance_amount !== "" ? row.remittance_amount : awbAmountByCrf.get(String(row.crf_id)) ?? 0),
         0
       ),
-      latest_remittance_date: summary.data?.[0]?.remittance_date ?? null,
+      latest_remittance_date: summaryRows?.[0]?.remittance_date ?? null,
     },
-    crfs: (summary.data || []).map((row) => ({
+    crfs: (summaryRows || []).map((row) => ({
       ...row,
-      ...(crfStats.get(row.crf_id) ?? { awb_count: 0, matched: 0, unmatched: 0, ambiguous: 0 }),
+      settlement_amount: row.remittance_amount != null && row.remittance_amount !== "" ? row.remittance_amount : (awbAmountByCrf.has(String(row.crf_id)) ? awbAmountByCrf.get(String(row.crf_id)) : null),
+      ...(crfStats.get(row.crf_id) ?? { awb_count: 0, matched: 0, unmatched: 0, ambiguous: 0, delivered: 0, not_delivered: 0 }),
     })),
     imports: imports.data || [],
   };
@@ -356,9 +520,13 @@ export async function exportShiprocketOrders(
   return { headers, rows, truncated };
 }
 
-export async function loadShiprocketQuality(): Promise<Record<string, unknown>> {
+export async function loadShiprocketQuality(request: ShiprocketFilterRequest = { filters: [], search: "", page: 1, pageSize: 1, sort: [] }): Promise<Record<string, unknown>> {
   const supabase = getSupabaseClient();
   const explorer = supabase.from("shiprocket_order_explorer");
+  // Supabase's generated builder types become recursively deep when reused across
+  // head-count and row queries; keep this local adapter intentionally untyped.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const scoped = (query: any): any => applyAllClauses(query, request);
 
   const [
     total,
@@ -366,22 +534,20 @@ export async function loadShiprocketQuality(): Promise<Record<string, unknown>> 
     missingAwb,
     missingShopifyId,
     matched,
-    unmatched,
     missingName,
     missingPhone,
     missingApi,
     latestWebhook,
   ] = await Promise.all([
-    explorer.select("sr_order_id", { count: "exact", head: true }),
-    explorer.select("sr_order_id", { count: "exact", head: true }).or("order_id.is.null,order_id.eq."),
-    explorer.select("sr_order_id", { count: "exact", head: true }).or("awb.is.null,awb.eq."),
-    explorer.select("sr_order_id", { count: "exact", head: true }).or("order_id_shopify_format.is.null,order_id_shopify_format.eq."),
-    explorer.select("sr_order_id", { count: "exact", head: true }).not("shopify_order_identifier", "is", null),
-    explorer.select("sr_order_id", { count: "exact", head: true }).not("order_id_shopify_format", "is", null).is("shopify_order_identifier", null),
-    explorer.select("sr_order_id", { count: "exact", head: true }).or("customer_name_shopify.is.null,customer_name_shopify.eq."),
-    explorer.select("sr_order_id", { count: "exact", head: true }).or("customer_phone_shopify.is.null,customer_phone_shopify.eq."),
-    explorer.select("sr_order_id", { count: "exact", head: true }).is("last_local_api_sync_at", null),
-    explorer.select("last_webhook_sync_at").order("last_webhook_sync_at", { ascending: false }).limit(1).maybeSingle(),
+    scoped(explorer.select("sr_order_id", { count: "exact", head: true })),
+    scoped(explorer.select("sr_order_id", { count: "exact", head: true }).or("order_id.is.null,order_id.eq.")),
+    scoped(explorer.select("sr_order_id", { count: "exact", head: true }).or("awb.is.null,awb.eq.")),
+    scoped(explorer.select("sr_order_id", { count: "exact", head: true }).or("order_id_shopify_format.is.null,order_id_shopify_format.eq.")),
+    scoped(explorer.select("sr_order_id", { count: "exact", head: true }).not("shopify_order_identifier", "is", null)),
+    scoped(explorer.select("sr_order_id", { count: "exact", head: true }).or("customer_name_shopify.is.null,customer_name_shopify.eq.")),
+    scoped(explorer.select("sr_order_id", { count: "exact", head: true }).or("customer_phone_shopify.is.null,customer_phone_shopify.eq.")),
+    scoped(explorer.select("sr_order_id", { count: "exact", head: true }).is("last_local_api_sync_at", null)),
+    scoped(explorer.select("last_webhook_sync_at").order("last_webhook_sync_at", { ascending: false }).limit(1).maybeSingle()),
   ]);
 
   return {
@@ -390,36 +556,37 @@ export async function loadShiprocketQuality(): Promise<Record<string, unknown>> 
     missing_awb: missingAwb.count ?? 0,
     missing_shopify_8_digit: missingShopifyId.count ?? 0,
     shopify_matched: matched.count ?? 0,
-    shopify_unmatched: unmatched.count ?? 0,
+    shopify_unmatched: Math.max(0, (total.count ?? 0) - (matched.count ?? 0)),
     missing_customer_name: missingName.count ?? 0,
     missing_customer_phone: missingPhone.count ?? 0,
     last_api_sync_missing: missingApi.count ?? 0,
     last_webhook_sync: latestWebhook.data?.last_webhook_sync_at ?? null,
-    remittance: (await loadRemittanceQuality()),
+    remittance: (await loadRemittanceQuality(request)),
   };
 }
 
-async function loadRemittanceQuality(): Promise<Record<string, unknown>> {
+async function loadRemittanceQuality(request: ShiprocketFilterRequest): Promise<Record<string, unknown>> {
   const supabase = getSupabaseClient();
-  const [crfs, awbs, matched, unmatched, ambiguous, latest] = await Promise.all([
-    supabase.from("shiprocket_remittances").select("id", { count: "exact", head: true }),
-    supabase.from("shiprocket_remittance_orders").select("id", { count: "exact", head: true }),
-    supabase.from("shiprocket_remittance_orders").select("id", { count: "exact", head: true }).eq("match_status", "matched"),
-    supabase.from("shiprocket_remittance_orders").select("id", { count: "exact", head: true }).eq("match_status", "unmatched"),
-    supabase.from("shiprocket_remittance_orders").select("id", { count: "exact", head: true }).eq("match_status", "ambiguous"),
-    supabase
-      .from("shiprocket_remittance_imports")
-      .select("completed_at, file_name, status")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle(),
+  const [selectedIds, latest] = await Promise.all([
+    filteredShiprocketIds(request),
+    supabase.from("shiprocket_remittance_imports").select("completed_at, file_name, status").eq("status", "completed").order("created_at", { ascending: false }).limit(1).maybeSingle(),
   ]);
+  const list = await loadScopedRemittanceRows(request, selectedIds);
+  const matchedCount = list.filter((row) => row.match_status === "matched").length;
+  const unmatchedCount = list.filter((row) => row.match_status !== "matched").length;
+  const ambiguousCount = list.filter((row) => row.match_status === "ambiguous").length;
+  const crfCount = new Set(list.map((row) => row.crf_id).filter(Boolean)).size;
+  const utrCount = new Set(list.map((row) => row.utr).filter(Boolean)).size;
   return {
-    crfs: crfs.count ?? 0,
-    awb_rows: awbs.count ?? 0,
-    matched: matched.count ?? 0,
-    unmatched: unmatched.count ?? 0,
-    ambiguous: ambiguous.count ?? 0,
+    status: list.length === 0 ? "NO_REMITTANCE_DATA" : matchedCount > 0 && (unmatchedCount > 0 || ambiguousCount > 0) ? "PARTIAL_REMITTANCE_DATA" : "RECONCILIATION_AVAILABLE",
+    data_available: list.length > 0,
+    crfs: crfCount,
+    utrs: utrCount,
+    awb_rows: list.length,
+    matched: matchedCount,
+    unmatched: unmatchedCount,
+    ambiguous: ambiguousCount,
+    match_rate: list.length ? Math.round((matchedCount / list.length) * 1000) / 10 : null,
     last_import: latest.data ?? null,
   };
 }

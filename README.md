@@ -208,6 +208,18 @@ Do **not** set `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY` or `GOOGLE_SERVICE_ACCOUNT_J
 25. `025_shiprocket_remittance.sql` — billing fields + remittance tables
 26. `026_shiprocket_remittance_indexes_security.sql`
 27. `027_shiprocket_order_360.sql` — one-row-per-order explorer + remittance summary
+28. `028_shiprocket_explorer_fix.sql`
+29. `029_enrich_shiprocket_order_conflict.sql`
+30. `030_shiprocket_explorer_sheet_formulas.sql`
+31. `031_pabbly_cutover.sql`
+32. `032_pabbly_backfill_support.sql`
+33. `033_shopify_child_cleanup_indexes.sql`
+34. `034_shopify_gokwik_analytics.sql`
+35. `035_shopify_meta_attribution_layer.sql` — deterministic Meta → Shopify attribution
+36. `036_shopify_order_delivery_remittance.sql` — Shopify → shipment → settlement journey
+37. `037_canonical_order_journey.sql` — canonical one-row-per-Shopify-order mart
+38. `038_customer_journey_profitability.sql` — business explorer, daily Meta commerce mart, freshness
+39. `039_customer_journey_attribution_semantics.sql` — separate channel and Meta attribution compatibility views
 
 After 011–027, expose the `analytics` schema in the Data API or Shopify/Meta/GA4 APIs return `Invalid schema: analytics`.
 
@@ -287,6 +299,10 @@ SELECT cron.schedule(
 5. Import: `POST /api/internal/shiprocket/remittance/import` (Bearer) or the Data Quality upload on the dashboard.
 6. One CRF/UTR can cover many AWBs. UTR is not unique per order.
 7. Keep `SHIPROCKET_PABBLY_ENABLED=false` during parallel validation.
+
+### 7.6 Customer journey and profitability
+
+Open `/dashboard/journey` to move from campaign → ad set → ad → Shopify orders → individual order timeline. Channel attribution (META/DIRECT/GOOGLE/KWIKENGAGE/OTHER/UNKNOWN) is separate from Meta entity attribution (EXACT_AD/EXACT_ADSET/EXACT_CAMPAIGN/META_SOURCE_ONLY/NO_META_MATCH). The page keeps non-Meta, shipment-unmatched, and remittance-missing orders visible. Metric definitions and live audit notes are in `docs/CUSTOMER_JOURNEY_V1_CORRECTION.md`.
 
 ---
 

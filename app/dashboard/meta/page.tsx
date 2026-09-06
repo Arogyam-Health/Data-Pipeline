@@ -14,6 +14,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { formatDateInTimeZone } from "@/modules/meta/dates";
 
 interface OverviewData {
   range: { from: string; to: string };
@@ -294,7 +295,8 @@ function CalendarGrid({ monthIso, from, to, onPick }: { monthIso: string; from: 
 }
 
 export default function MetaDashboard() {
-  const todayIso = new Date().toISOString().slice(0, 10);
+  // Meta reporting days are account-local, not UTC days.
+  const todayIso = formatDateInTimeZone(new Date(), "Asia/Kolkata");
   const [preset, setPreset] = useState<DatePreset>("last_30d");
   const [calendarOpen, setCalendarOpen] = useState(false);
   const initial = getPresetRange("last_30d", todayIso);
@@ -332,7 +334,6 @@ export default function MetaDashboard() {
     return () => clearTimeout(timer);
   }, [searchInput]);
 
-  const presetRange = useMemo(() => getPresetRange(preset, todayIso), [preset, todayIso]);
   // when preset changes, sync customFrom/To except custom keeps manual
   useEffect(() => {
     if (preset !== "custom") {
@@ -343,12 +344,18 @@ export default function MetaDashboard() {
   }, [preset, todayIso]);
 
   const query = useMemo(() => {
-    // map preset to legacy range param for API compatibility
-    const legacyRange = preset === "today" ? "today" : preset === "maximum" ? "90d" : preset === "last_7d" ? "7d" : preset === "last_30d" ? "30d" : preset === "last_14d" ? "custom" : preset === "last_28d" ? "custom" : "custom";
-    const params = new URLSearchParams({ range: legacyRange });
-    if (customFrom && customTo) {
-      params.set("from", customFrom);
-      params.set("to", customTo);
+    // Never append the previous custom range to a named preset. The previous
+    // implementation made a visible Today selection query stale 30-day data.
+    const selected = getPresetRange(preset, todayIso);
+    const legacyRange = preset === "today" ? "today" : preset === "last_7d" ? "7d" : preset === "last_30d" ? "30d" : undefined;
+    const params = new URLSearchParams(legacyRange ? { range: legacyRange } : { range: "custom" });
+    if (!legacyRange) {
+      const from = preset === "custom" ? customFrom : selected.from;
+      const to = preset === "custom" ? customTo : selected.to;
+      if (from && to) {
+        params.set("from", from);
+        params.set("to", to);
+      }
     }
     setParam(params, "search", search);
     setParam(params, "campaignId", campaignId);
@@ -621,7 +628,7 @@ export default function MetaDashboard() {
               className="px-4 py-2 bg-white rounded shadow border flex items-center gap-2"
             >
               <span>📅</span>
-              <span>{preset === "custom" ? `${formatDisplayDate(customFrom)} - ${formatDisplayDate(customTo)}` : getPresetRange(preset, todayIso).label}</span>
+              <span>{preset === "custom" ? `${formatDisplayDate(customFrom)} - ${formatDisplayDate(customTo)}` : getPresetRange(preset, data.syncHealth?.account_timezone ? formatDateInTimeZone(new Date(), data.syncHealth.account_timezone) : todayIso).label}</span>
               <span className="text-gray-400">▼</span>
             </button>
             {calendarOpen && (
@@ -983,15 +990,15 @@ export default function MetaDashboard() {
                   <td className="text-right">{(row as any).cpm != null ? money((row as any).cpm, currency) : row.impressions ? money(Number(row.spend) / Number(row.impressions) * 1000, currency) : "—"}</td>
                   <td className="text-right">{num((row as any).website_purchases ?? row.purchases, 0)}</td>
                   <td className="text-right">{row.ends ? new Date(row.ends).toLocaleDateString() : row.stop_time ? new Date(row.stop_time).toLocaleDateString() : "Ongoing"}</td>
-                  <td className="text-right text-xs">{row.attribution_setting || "—"}</td>
-                  <td className="text-right text-xs">—</td>
+                  <td className="text-right text-xs">{row.attribution_setting || "Not available"}</td>
+                  <td className="text-right text-xs">{row.bid_strategy || "Not available"}</td>
                   <td className="text-right">{num((row as any).website_roas ?? row.roas)}</td>
                 </tr>
                 );
               })}
             </tbody>
           </table>
-          <p className="text-xs text-gray-500 mt-2">Run <code>POST /api/internal/meta/sync/metadata</code> after <code>META_METADATA_SYNC_ENABLED=true</code> to populate Delivery/Budget/Ends/Bid. Attribution requires new migration 018.</p>
+          <p className="text-xs text-gray-500 mt-2">Delivery, budget, schedule and attribution values are sourced from the latest Meta metadata sync. Fields Meta does not provide are shown as Not available.</p>
         </TableCard>
 
         <TableCard title="Ad set performance — Ad sets for 1 Campaign (with Landing Page Views)">
@@ -1085,7 +1092,11 @@ export default function MetaDashboard() {
                       {row.ad_name}
                     </button>
                   </td>
-                  <td>{(row as any).delivery || (row as any).effective_status ? <span className={String((row as any).delivery||"").toLowerCase().includes("active")?"text-green-700":"text-gray-500"}>● {(row as any).delivery||(row as any).effective_status}</span> : <span className="text-green-700">● Active</span>}</td>
+                  {(row as any).delivery || (row as any).effective_status ? (
+                    <td><span className={String((row as any).delivery || "").toLowerCase().includes("active") ? "text-green-700" : "text-gray-500"}>● {(row as any).delivery || (row as any).effective_status}</span></td>
+                  ) : (
+                    <td><span className="text-gray-500">Not available</span></td>
+                  )}
                   <td className="text-right">{money(row.spend, currency)}</td>
                   <td className="text-right">{(row as any).impressions != null ? num((row as any).impressions, 0) : "—"}</td>
                   <td className="text-right">{(row as any).reach != null ? num((row as any).reach, 0) : "—"}</td>

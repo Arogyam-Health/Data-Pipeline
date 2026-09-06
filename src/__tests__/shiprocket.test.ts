@@ -31,6 +31,7 @@ import {
   parseRemittanceWorkbook,
 } from "../modules/shiprocket/remittance";
 import { classifyShiprocketStatus, computeOverviewFromRows } from "../modules/shiprocket/status";
+import { reconciliationStatus } from "../modules/shiprocket/query";
 
 // ============================================================
 // Test fixtures (fake data, no real PII)
@@ -833,6 +834,14 @@ describe("Remittance matching", () => {
 });
 
 describe("KPI and table consistency", () => {
+  it("classifies delivery/remittance intersections independently", () => {
+    expect(reconciliationStatus({ status_bucket: "delivered", payment_bucket: "COD", remittance_match_status: "matched" })).toBe("DELIVERED_REMITTED");
+    expect(reconciliationStatus({ status_bucket: "delivered", payment_bucket: "COD", remittance_match_status: "unmatched" })).toBe("DELIVERED_NOT_REMITTED");
+    expect(reconciliationStatus({ status_bucket: "delivered", payment_bucket: "Prepaid", remittance_match_status: "unmatched" })).toBe("NOT_APPLICABLE_PREPAID");
+    expect(reconciliationStatus({ status_bucket: "rto", payment_bucket: "COD", remittance_match_status: "matched" })).toBe("REMITTED_NOT_DELIVERED");
+    expect(reconciliationStatus({ status_bucket: "in_transit", payment_bucket: "COD", remittance_match_status: "matched" })).toBe("REMITTED_NOT_DELIVERED");
+    expect(reconciliationStatus({ status_bucket: "delivered", remittance_match_status: "matched" })).toBe("UNKNOWN_PAYMENT");
+  });
   it("classifies RTO Delivered as rto, not delivered", () => {
     expect(classifyShiprocketStatus("RTO Delivered", "RTO Delivered")).toBe("rto");
     expect(classifyShiprocketStatus("Delivered", "")).toBe("delivered");
@@ -869,7 +878,8 @@ describe("KPI and table consistency", () => {
       },
     ]);
     expect(overview.totalOrders).toBe(1);
-    expect(overview.settledOrders).toBe(1);
+    expect(overview.settledOrders).toBe(0);
+    expect(overview.remittanceMatched).toBe(1);
   });
 });
 
@@ -986,5 +996,47 @@ describe("Pabbly dispatch architecture", () => {
     expect(overview.pabblyPending).toBe(0);
     expect(overview.pabblyRetrying).toBe(0);
     expect(overview.pabblyTotalDeliveries).toBe(0);
+  });
+
+  it("distinguishes missing commercial data from measured zero", () => {
+    const overview = computeOverviewFromRows([{ sr_order_id: "SR-NO-COMMERCIAL" }]);
+    expect(overview.commercialDataAvailable).toBe(false);
+    expect(overview.commercialSource).toBe("NOT_AVAILABLE");
+    expect(overview.codOrders).toBeNull();
+    expect(overview.prepaidOrders).toBeNull();
+    expect(overview.totalOrderValue).toBeNull();
+  });
+
+  it("uses Shopify commercial enrichment when Shiprocket billing fields are absent", () => {
+    const overview = computeOverviewFromRows([{
+      sr_order_id: "SR-SHOPIFY",
+      shopify_current_total_price: 499,
+      shopify_payment_category: "COD",
+    }]);
+    expect(overview.commercialDataAvailable).toBe(true);
+    expect(overview.commercialSource).toBe("SHOPIFY_ENRICHED");
+    expect(overview.codOrders).toBe(1);
+    expect(overview.totalOrderValue).toBe(499);
+  });
+
+  it("reports no remittance data separately from a zero matched count", () => {
+    const overview = computeOverviewFromRows([{ sr_order_id: "SR-NO-REMITTANCE" }]);
+    expect(overview.remittanceDataAvailable).toBe(false);
+    expect(overview.remittanceStatus).toBe("NO_REMITTANCE_DATA");
+    expect(overview.remittanceRowsTotal).toBe(0);
+  });
+
+  it("keeps universal delivery reconciliation independent of payment classification", () => {
+    const overview = computeOverviewFromRows([
+      { sr_order_id: "SR-D1", status_bucket: "delivered", remittance_match_status: "matched" },
+      { sr_order_id: "SR-D2", status_bucket: "delivered", remittance_match_status: "unmatched", shopify_payment_category: "COD" },
+      { sr_order_id: "SR-R1", status_bucket: "rto", remittance_match_status: "matched" },
+    ]);
+    expect(overview.deliveredOrdersWithRemittance).toBe(1);
+    expect(overview.deliveredOrdersWithoutRemittance).toBe(1);
+    expect(overview.remittedNotDeliveredOrders).toBe(1);
+    expect(overview.deliveredOrdersWithRemittance! + overview.deliveredOrdersWithoutRemittance!).toBe(overview.delivered);
+    expect(overview.deliveredCodOrders).toBe(1);
+    expect(overview.deliveredNotRemittedOrders).toBe(1);
   });
 });
