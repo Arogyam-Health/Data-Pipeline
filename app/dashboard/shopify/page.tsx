@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { datePickerRangeToTimestamps } from "@/lib/date-range";
 import {
   Area,
   AreaChart,
@@ -120,21 +121,32 @@ export default function ShopifyDashboard() {
   const [cancelledFilter, setCancelledFilter] = useState("");
   const [cancelReasonFilter, setCancelReasonFilter] = useState("");
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestId = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search.trim()), 350);
+    return () => clearTimeout(timer);
+  }, [search]);
 
   const query = useMemo(() => {
     const params = new URLSearchParams({ range });
     if (range === "custom" && customFrom && customTo) {
-      params.set("from", new Date(customFrom).toISOString());
-      const toEnd = new Date(customTo);
-      toEnd.setUTCHours(23, 59, 59, 999);
-      params.set("to", toEnd.toISOString());
+      const timestamps = datePickerRangeToTimestamps(customFrom, customTo);
+      params.set("from", timestamps.from);
+      params.set("to", timestamps.to);
     }
     return params.toString();
   }, [range, customFrom, customTo]);
 
   async function load() {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const currentRequest = ++requestId.current;
     setLoading(true);
     try {
       const orderQuery = new URLSearchParams(query);
@@ -145,11 +157,11 @@ export default function ShopifyDashboard() {
       if (paymentFilter) orderQuery.set("paymentCategory", paymentFilter);
       if (cancelledFilter) orderQuery.set("cancelled", cancelledFilter);
       if (cancelReasonFilter) orderQuery.set("cancelReason", cancelReasonFilter);
-      if (search.trim()) orderQuery.set("search", search.trim());
+      if (debouncedSearch) orderQuery.set("search", debouncedSearch);
 
       const [overviewRes, ordersRes] = await Promise.all([
-        fetch(`/api/shopify/analytics/overview?${query}`, { credentials: "include" }),
-        fetch(`/api/shopify/orders?${orderQuery.toString()}`, { credentials: "include" }),
+        fetch(`/api/shopify/analytics/overview?${query}`, { credentials: "include", signal: controller.signal }),
+        fetch(`/api/shopify/orders?${orderQuery.toString()}`, { credentials: "include", signal: controller.signal }),
       ]);
       if (!overviewRes.ok || !ordersRes.ok) {
         const failed = !overviewRes.ok ? overviewRes : ordersRes;
@@ -158,20 +170,24 @@ export default function ShopifyDashboard() {
       }
       const overview = await overviewRes.json();
       const orderPage = await ordersRes.json();
-      setData(overview);
-      setOrders(orderPage.orders ?? []);
-      setTotalOrders(orderPage.total ?? 0);
-      setError(null);
+      if (currentRequest === requestId.current) {
+        setData(overview);
+        setOrders(orderPage.orders ?? []);
+        setTotalOrders(orderPage.total ?? 0);
+        setError(null);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      if ((err as { name?: string })?.name !== "AbortError" && currentRequest === requestId.current) {
+        setError(err instanceof Error ? err.message : "Unknown error");
+      }
     } finally {
-      setLoading(false);
+      if (currentRequest === requestId.current) setLoading(false);
     }
   }
 
   useEffect(() => {
     load();
-  }, [query, page, financialFilter, fulfillmentFilter, paymentFilter, cancelledFilter, cancelReasonFilter, search]);
+  }, [query, page, financialFilter, fulfillmentFilter, paymentFilter, cancelledFilter, cancelReasonFilter, debouncedSearch]);
 
   if (loading && !data) {
     return (
@@ -210,7 +226,8 @@ export default function ShopifyDashboard() {
   ];
 
   return (
-    <div className="min-h-screen bg-gray-100 p-8">
+    <div className="min-h-screen bg-gray-100 p-8 relative">
+      {loading && data && <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/10 pointer-events-none"><div className="rounded-lg bg-white px-5 py-3 shadow-lg text-gray-700">Loading filtered data…</div></div>}
       <div className="max-w-full mx-auto">
         <div className="flex justify-between items-center mb-8">
           <div>

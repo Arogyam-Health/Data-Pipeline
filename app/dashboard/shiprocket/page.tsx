@@ -3,12 +3,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { formatDateInTimeZone } from "@/modules/meta/dates";
 import "./shiprocket-dashboard.css";
 
 type DatePreset = "today" | "yesterday" | "last_7d" | "last_14d" | "last_28d" | "last_30d" | "this_week" | "last_week" | "this_month" | "last_month" | "maximum" | "custom";
 function formatDisplayDate(iso: string): string {
-  const d = new Date(iso + "T00:00:00");
-  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+  const [year, month, day] = formatDateInTimeZone(new Date(`${iso}T00:00:00Z`), "Asia/Kolkata").split("-");
+  return new Date(Date.UTC(Number(year), Number(month) - 1, Number(day))).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 }
 function getPresetRange(preset: DatePreset, todayIso: string): { from: string; to: string; label: string } {
   const addDays = (iso: string, n: number) => {
@@ -44,6 +45,10 @@ function getPresetRange(preset: DatePreset, todayIso: string): { from: string; t
     case "maximum": return { from: addDays(today, -89), to: today, label: `Maximum (90 days)` };
     default: return { from: today, to: today, label: "Custom" };
   }
+}
+function addCalendarDay(iso: string): string {
+  const [year, month, day] = iso.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10);
 }
 function CalendarGrid({ monthIso, from, to, onPick }: { monthIso: string; from: string; to: string; onPick: (iso: string) => void }) {
   const [y, m] = monthIso.split("-").map(Number);
@@ -299,11 +304,13 @@ export default function ShiprocketDashboardPage() {
   const [importResult, setImportResult] = useState<string>("");
   const columnPopoverRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const requestId = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
+  const todayIso = formatDateInTimeZone(new Date(), "Asia/Kolkata");
   const [preset, setPreset] = useState<DatePreset>("maximum");
   const [calendarOpen, setCalendarOpen] = useState(false);
-  const [customFrom, setCustomFrom] = useState(() => getPresetRange("maximum", new Date().toISOString().slice(0, 10)).from);
-  const [customTo, setCustomTo] = useState(() => getPresetRange("maximum", new Date().toISOString().slice(0, 10)).to);
+  const [customFrom, setCustomFrom] = useState(() => getPresetRange("maximum", formatDateInTimeZone(new Date(), "Asia/Kolkata")).from);
+  const [customTo, setCustomTo] = useState(() => getPresetRange("maximum", formatDateInTimeZone(new Date(), "Asia/Kolkata")).to);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 350);
@@ -354,7 +361,10 @@ export default function ShiprocketDashboardPage() {
   }, [preset, todayIso]);
 
   const payload = useMemo(() => {
-    const dateFilter = preset === "maximum" ? [] : [{ field: "last_webhook_sync_at", operator: "between", value: [customFrom, customTo] as unknown as string[] }];
+    const dateFilter = preset === "maximum" ? [] : [
+      { field: "awb_assigned_date", operator: "gte", value: customFrom },
+      { field: "awb_assigned_date", operator: "lt", value: addCalendarDay(customTo) },
+    ];
     return {
       filters: [...appliedFilters, ...dateFilter],
       search: debouncedSearch,
@@ -365,6 +375,10 @@ export default function ShiprocketDashboardPage() {
   }, [appliedFilters, debouncedSearch, page, pageSize, sortField, sortDir, preset, customFrom, customTo]);
 
   const load = useCallback(async () => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const currentRequest = ++requestId.current;
     setLoading(true);
     try {
       const [ordersRes, overviewRes, qualityRes, remRes] = await Promise.all([
@@ -372,16 +386,18 @@ export default function ShiprocketDashboardPage() {
           method: "POST",
           credentials: "include",
           headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
           body: JSON.stringify(payload),
         }),
         fetch("/api/shiprocket/overview", {
           method: "POST",
           credentials: "include",
           headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
           body: JSON.stringify(payload),
         }),
-        fetch("/api/shiprocket/quality", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }),
-        fetch("/api/shiprocket/remittances", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }),
+        fetch("/api/shiprocket/quality", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: controller.signal }),
+        fetch("/api/shiprocket/remittances", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: controller.signal }),
       ]);
       const ordersBody = await ordersRes.json();
       const overviewBody = await overviewRes.json();
@@ -389,16 +405,20 @@ export default function ShiprocketDashboardPage() {
       const remBody = await remRes.json();
       if (!ordersRes.ok) throw new Error(ordersBody.error || "Query failed");
       if (!overviewRes.ok) throw new Error(overviewBody.error || "Overview failed");
-      setRows(ordersBody.rows || []);
-      setTotal(ordersBody.total || 0);
-      setOverview(overviewBody.overview || null);
-      setQuality(qualityBody.quality || null);
-      setRemittances(remBody);
-      setError(null);
+      if (currentRequest === requestId.current) {
+        setRows(ordersBody.rows || []);
+        setTotal(ordersBody.total || 0);
+        setOverview(overviewBody.overview || null);
+        setQuality(qualityBody.quality || null);
+        setRemittances(remBody);
+        setError(null);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Query failed");
+      if ((err as { name?: string })?.name !== "AbortError" && currentRequest === requestId.current) {
+        setError(err instanceof Error ? err.message : "Query failed");
+      }
     } finally {
-      setLoading(false);
+      if (currentRequest === requestId.current) setLoading(false);
     }
   }, [payload]);
 
@@ -450,7 +470,15 @@ export default function ShiprocketDashboardPage() {
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        filters: appliedFilters,
+        filters: [
+          ...appliedFilters,
+          ...(preset === "maximum"
+            ? []
+            : [
+                { field: "awb_assigned_date", operator: "gte", value: customFrom },
+                { field: "awb_assigned_date", operator: "lt", value: addCalendarDay(customTo) },
+              ]),
+        ],
         search: debouncedSearch,
         sort: [{ field: sortField, direction: sortDir }],
         legacyLabels: false,
@@ -733,6 +761,7 @@ export default function ShiprocketDashboardPage() {
 
         {error && <div className="sr-alert sr-alert-error">{error}</div>}
         {loading && !overview && <p className="sr-loading">Loading dashboard…</p>}
+        {loading && overview && <div className="sr-loading-overlay" role="status">Loading filtered data…</div>}
 
         {/* KPI sections */}
         {kpiGroups.map((group) => (

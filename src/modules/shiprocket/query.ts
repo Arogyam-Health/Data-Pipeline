@@ -51,17 +51,25 @@ const OVERVIEW_COLUMNS = [
   "pabbly_failed_count",
 ].join(",");
 
+function previousCalendarDay(iso: string): string {
+  const [year, month, day] = iso.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day - 1)).toISOString().slice(0, 10);
+}
+
 function requestDateRange(request: ShiprocketFilterRequest): [string | null, string | null] {
+  let from: string | null = null;
+  let to: string | null = null;
   for (const filter of request.filters || []) {
     if (!("field" in filter)) continue;
     if (filter.field !== "last_webhook_sync_at" && filter.field !== "awb_assigned_date" && filter.field !== "order_date") continue;
     if (filter.operator === "between" && Array.isArray(filter.value)) return [String(filter.value[0] || "").slice(0, 10) || null, String(filter.value[1] || "").slice(0, 10) || null];
-    if (["on", "after", "before", "gte", "lte"].includes(filter.operator)) {
+    if (["on", "after", "before", "gte", "gt", "lt", "lte"].includes(filter.operator)) {
       const day = String(filter.value || "").slice(0, 10);
-      return filter.operator === "after" || filter.operator === "gte" ? [day, null] : [null, day];
+      if (filter.operator === "after" || filter.operator === "gte" || filter.operator === "gt") from = day || null;
+      else to = day ? (filter.operator === "lt" ? previousCalendarDay(day) : day) : null;
     }
   }
-  return [null, null];
+  return [from, to];
 }
 
 async function scopedRemittanceStats(request: ShiprocketFilterRequest, srOrderIds: string[]) {

@@ -4,8 +4,6 @@ import {
   dashboardAuthConfigured,
 } from "./internal-auth";
 import { dashboardRangeSchema, metaErrorResponse, parseMetaFilters, resolveDashboardDateRange } from "./http";
-import { getAccount } from "./repository";
-import { getMetaEnv } from "./env";
 import type { MetaFilters } from "./filters";
 
 export async function withMetaDashboard<T>(
@@ -21,14 +19,9 @@ export async function withMetaDashboard<T>(
     if (!parsed.success) {
       return NextResponse.json({ error: "Invalid query parameters" }, { status: 400 });
     }
-    let timeZone = "UTC";
-    try {
-      const account = await getAccount(getMetaEnv().META_AD_ACCOUNT_ID);
-      timeZone = account?.timezone_name || "UTC";
-    } catch {
-      timeZone = "UTC";
-    }
-    const range = resolveDashboardDateRange({ ...parsed.data, timeZone });
+    // Dashboard calendar/reporting boundaries are intentionally fixed to IST.
+    // Meta account timezone must not move the visible "Today" date backward.
+    const range = resolveDashboardDateRange({ ...parsed.data, timeZone: "Asia/Kolkata" });
     const filters = parseMetaFilters(parsed.data);
     const data = await loader({ range, filters });
     return NextResponse.json({ success: true, range, filters, ...(isPlainObject(data) ? data : { data }) });

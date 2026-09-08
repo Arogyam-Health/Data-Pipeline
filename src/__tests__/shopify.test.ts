@@ -23,6 +23,7 @@ import {
   shouldAdvanceWatermark,
 } from "../modules/shopify/sync";
 import { childUpsertConflictTarget, computeStaleKeys } from "../modules/shopify/repository";
+import { datePickerRangeToTimestamps } from "../lib/date-range";
 import {
   ShopifyAuthError,
   ShopifySyncConflictError,
@@ -552,6 +553,13 @@ describe("Shopify normalization", () => {
 });
 
 describe("Shopify watermark and concurrency", () => {
+  it("converts date-picker dates to India-midnight boundaries", () => {
+    expect(datePickerRangeToTimestamps("2026-09-07", "2026-09-08")).toEqual({
+      from: "2026-09-06T18:30:00.000Z",
+      to: "2026-09-08T18:29:59.999Z",
+    });
+  });
+
   const now = new Date("2026-08-21T12:00:00.000Z");
 
   it("uses a 10-minute overlap for incremental sync", () => {

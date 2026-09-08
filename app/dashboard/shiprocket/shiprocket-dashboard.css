@@ -904,6 +904,19 @@
   padding: 0.5rem 0;
 }
 
+.sr-loading-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.08);
+  pointer-events: none;
+  color: #334155;
+  font-weight: 600;
+}
+
 .sr-collapsed-panel {
   display: none;
 }

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { datePickerRangeToTimestamps } from "@/lib/date-range";
 
 interface GokwikOrder {
   shopify_order_id: string;
@@ -77,11 +78,9 @@ export default function GokwikDashboard() {
   const query = useMemo(() => {
     const p = new URLSearchParams({ range });
     if (range === "custom" && customFrom && customTo) {
-      p.set("from", new Date(customFrom).toISOString());
-      // inclusive end-of-day: same-day 2026-09-01→2026-09-01 must be 00:00 → 23:59:59.999
-      const toEnd = new Date(customTo);
-      toEnd.setUTCHours(23, 59, 59, 999);
-      p.set("to", toEnd.toISOString());
+      const timestamps = datePickerRangeToTimestamps(customFrom, customTo);
+      p.set("from", timestamps.from);
+      p.set("to", timestamps.to);
     }
     return p.toString();
   }, [range, customFrom, customTo]);

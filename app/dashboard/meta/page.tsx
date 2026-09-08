@@ -628,7 +628,7 @@ export default function MetaDashboard() {
               className="px-4 py-2 bg-white rounded shadow border flex items-center gap-2"
             >
               <span>📅</span>
-              <span>{preset === "custom" ? `${formatDisplayDate(customFrom)} - ${formatDisplayDate(customTo)}` : getPresetRange(preset, data.syncHealth?.account_timezone ? formatDateInTimeZone(new Date(), data.syncHealth.account_timezone) : todayIso).label}</span>
+              <span>{preset === "custom" ? `${formatDisplayDate(customFrom)} - ${formatDisplayDate(customTo)}` : getPresetRange(preset, todayIso).label}</span>
               <span className="text-gray-400">▼</span>
             </button>
             {calendarOpen && (

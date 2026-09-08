@@ -88,6 +88,10 @@ const DATE_OPS: FilterOperator[] = [
   "on",
   "before",
   "after",
+  "gt",
+  "gte",
+  "lt",
+  "lte",
   "between",
   "last_n_days",
   "today",
@@ -153,7 +157,7 @@ export const SHIPROCKET_FILTER_FIELDS: FilterFieldMeta[] = [
   text("pickup_location", "Pickup Location", "Logistics"),
   text("shipping_method", "Shipping Method", "Logistics"),
   text("etd", "Etd", "Logistics"),
-  text("awb_assigned_date", "AWB Assigned Date", "Logistics"),
+  date("awb_assigned_date", "AWB Assigned Date", "Logistics"),
   text("pickup_scheduled_date", "Pickup Scheduled Date", "Logistics"),
   date("delivered_date", "Delivered Date", "Logistics"),
   num("delivery_attempt_count", "Delivery Attempt Count", "Logistics"),
@@ -382,7 +386,7 @@ function validateValue(
     }
     return;
   }
-  if (meta.type === "date" && (operator === "on" || operator === "before" || operator === "after")) {
+  if (meta.type === "date" && ["on", "before", "after", "gt", "gte", "lt", "lte"].includes(operator)) {
     assertDate(value);
   }
 }
