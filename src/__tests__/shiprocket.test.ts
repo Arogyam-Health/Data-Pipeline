@@ -423,6 +423,7 @@ describe("Shiprocket Parser", () => {
       expect(row.awb).toBe("77914492460");
       expect(row.return_awb_code).toBe("77151457062");
       expect(row.undelivered_reason).toBe("COD Not Ready");
+      expect(row.undelivered_reason_code).toBe("SRNDR3");
       expect(row.etd).toBe("2026-08-23 00:00:00");
       expect(row.shipping_method).toBe("SR");
       expect(row.pod_status).toBe("OTP Based Delivery");

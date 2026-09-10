@@ -8,7 +8,7 @@ type Row = Record<string, unknown> & { shopify_order_id: string };
 type ProfitRow = Record<string, unknown>;
 type Summary = {
   totalOrders: number; knownChannel: number; unknownChannel: number; metaChannelOrders: number; metaAttributedOrders: number; exactMetaEntityOrders: number; exactAdOrders: number; metaSourceOnlyOrders: number; shiprocketMatched: number;
-  delivered: number; rto: number; ndr: number; deliveredNotRemitted: number; deliveredCod: number;
+  delivered: number; rto: number; ndr: number; hadNdr: number; deliveredNotRemitted: number; deliveredCod: number;
   remittedCod: number; remittanceMatched: number; hierarchyConflicts: number; attributedRevenue: number; deliveredRevenue: number;
   averageRemittanceDelayDays: number | null;
   channelBreakdown: Record<string, number>; metaBreakdown: Record<string, number>;
@@ -18,7 +18,7 @@ type Detail = { order: Row; attribution: Record<string, unknown> | null; shipmen
 const today = new Date().toISOString().slice(0, 10);
 const daysAgo = (days: number) => new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
 
-const EMPTY_SUMMARY: Summary = { totalOrders: 0, knownChannel: 0, unknownChannel: 0, metaChannelOrders: 0, metaAttributedOrders: 0, exactMetaEntityOrders: 0, exactAdOrders: 0, metaSourceOnlyOrders: 0, shiprocketMatched: 0, delivered: 0, rto: 0, ndr: 0, deliveredNotRemitted: 0, deliveredCod: 0, remittedCod: 0, remittanceMatched: 0, hierarchyConflicts: 0, averageRemittanceDelayDays: null, attributedRevenue: 0, deliveredRevenue: 0, channelBreakdown: {}, metaBreakdown: {} };
+const EMPTY_SUMMARY: Summary = { totalOrders: 0, knownChannel: 0, unknownChannel: 0, metaChannelOrders: 0, metaAttributedOrders: 0, exactMetaEntityOrders: 0, exactAdOrders: 0, metaSourceOnlyOrders: 0, shiprocketMatched: 0, delivered: 0, rto: 0, ndr: 0, hadNdr: 0, deliveredNotRemitted: 0, deliveredCod: 0, remittedCod: 0, remittanceMatched: 0, hierarchyConflicts: 0, averageRemittanceDelayDays: null, attributedRevenue: 0, deliveredRevenue: 0, channelBreakdown: {}, metaBreakdown: {} };
 
 function text(value: unknown, fallback = "NOT AVAILABLE") {
   return value == null || value === "" ? fallback : String(value);
@@ -127,7 +127,7 @@ export default function JourneyDashboard() {
     ["Meta Channel", `${number(cohortSummary.metaChannelOrders)} (${percent(cohortSummary.metaChannelOrders, cohortSummary.totalOrders)})`], ["Exact Meta Entity", `${number(cohortSummary.exactMetaEntityOrders)} (${percent(cohortSummary.exactMetaEntityOrders, cohortSummary.totalOrders)})`], ["Exact Meta Ad", cohortSummary.exactAdOrders], ["Meta Source Only", `${number(cohortSummary.metaSourceOnlyOrders)} (${percent(cohortSummary.metaSourceOnlyOrders, cohortSummary.totalOrders)})`], ["Shopify → Shiprocket", `${number(cohortSummary.shiprocketMatched)} (${percent(cohortSummary.shiprocketMatched, cohortSummary.totalOrders)})`],
   ];
   const outcomeKpis = [
-    ["Filtered Outcome Orders", summary.totalOrders], ["Delivered", summary.delivered], ["RTO", summary.rto], ["NDR", summary.ndr], ["Delivered Not Remitted", summary.deliveredNotRemitted], ["Remitted COD", `${number(summary.remittedCod)} (${percent(summary.remittedCod, summary.deliveredCod)})`], ["Avg Remittance Delay", summary.averageRemittanceDelayDays == null ? "NOT AVAILABLE" : `${number(summary.averageRemittanceDelayDays)} d`],
+    ["Filtered Outcome Orders", summary.totalOrders], ["Delivered", summary.delivered], ["RTO", summary.rto], ["NDR Open", summary.ndr], ["Had NDR", summary.hadNdr], ["Delivered Not Remitted", summary.deliveredNotRemitted], ["Remitted COD", `${number(summary.remittedCod)} (${percent(summary.remittedCod, summary.deliveredCod)})`], ["Avg Remittance Delay", summary.averageRemittanceDelayDays == null ? "NOT AVAILABLE" : `${number(summary.averageRemittanceDelayDays)} d`],
   ];
 
   return (
@@ -153,7 +153,8 @@ export default function JourneyDashboard() {
         <label>Remittance<select value={filters.remittanceStatus || ""} onChange={(e) => update("remittanceStatus", e.target.value)}><option value="">All</option><option>REMITTED</option><option>DELIVERED_NOT_REMITTED</option><option>NOT_APPLICABLE</option><option>AMBIGUOUS</option></select></label>
         <label>Delivered<select value={filters.delivered || ""} onChange={(e) => update("delivered", e.target.value)}><option value="">All</option><option value="true">Yes</option><option value="false">No</option></select></label>
         <label>RTO<select value={filters.rto || ""} onChange={(e) => update("rto", e.target.value)}><option value="">All</option><option value="true">Yes</option><option value="false">No</option></select></label>
-        <label>NDR<select value={filters.ndr || ""} onChange={(e) => update("ndr", e.target.value)}><option value="">All</option><option value="true">Yes</option><option value="false">No</option></select></label>
+        <label>NDR Open<select value={filters.ndr || ""} onChange={(e) => update("ndr", e.target.value)}><option value="">All</option><option value="true">Yes</option><option value="false">No</option></select></label>
+        <label>Had NDR<select value={filters.hadNdr || ""} onChange={(e) => update("hadNdr", e.target.value)}><option value="">All</option><option value="true">Yes</option><option value="false">No</option></select></label>
         <label>Courier<input value={filters.courier || ""} onChange={(e) => update("courier", e.target.value)} placeholder="Exact courier" /></label>
         <label className="wide">Search order / AWB / SR ID<div className="search-line"><input value={draftSearch} onChange={(e) => setDraftSearch(e.target.value)} onKeyDown={(e) => e.key === "Enter" && update("search", draftSearch)} placeholder="#12345 or AWB" /><button onClick={() => update("search", draftSearch)}>Search</button></div></label>
         <button className="clear" onClick={() => { setFilters({ from: daysAgo(89), to: today }); setDraftSearch(""); setLevel("campaign"); }}>Clear filters</button>

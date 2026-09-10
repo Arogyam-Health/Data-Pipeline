@@ -102,4 +102,27 @@ describe("customer journey and profitability", () => {
     expect(summary.deliveredNotRemitted).toBe(1);
     expect(summary.remittedCod).toBe(0);
   });
+
+  it("counts open NDR and historical NDR independently", () => {
+    const summary = computeJourneySummary([
+      { shopify_order_id: "DELIVERED", is_delivered: true, is_rto: false, is_ndr: false, had_ndr: false },
+      { shopify_order_id: "OPEN", is_delivered: false, is_rto: false, is_ndr: true, had_ndr: true },
+      { shopify_order_id: "RTO_AFTER_NDR", is_delivered: false, is_rto: true, is_ndr: false, had_ndr: true },
+      { shopify_order_id: "RTO_UNKNOWN", is_delivered: false, is_rto: true, is_ndr: false, had_ndr: false },
+    ]);
+    expect(summary.ndr).toBe(1);
+    expect(summary.hadNdr).toBe(2);
+    expect(summary.rto).toBe(2);
+    expect(summary.delivered).toBe(1);
+  });
+
+  it("keeps delivered current revenue independent of historical NDR", () => {
+    const [row] = aggregateProfitability(
+      [{ campaign_id: "C1", adset_id: "S1", ad_id: "A1", spend: 1000 }],
+      [{ shopify_order_id: "DELIVERED_AFTER_NDR", resolved_campaign_id: "C1", resolved_adset_id: "S1", resolved_ad_id: "A1", meta_attribution_state: "EXACT_AD", ordered_revenue: 1000, current_revenue: 800, delivered_current_revenue: 800, is_delivered: true, is_rto: false, is_ndr: false, had_ndr: true }],
+      "ad"
+    );
+    expect(row.delivered_current_revenue).toBe(800);
+    expect(row.delivered_current_roas).toBe(0.8);
+  });
 });

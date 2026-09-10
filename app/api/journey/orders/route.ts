@@ -20,7 +20,7 @@ export async function GET(request: NextRequest) {
       campaignId: value(p, "campaignId"), adsetId: value(p, "adsetId"), adId: value(p, "adId"),
       attributionStatus: value(p, "attributionStatus"), paymentCategory: value(p, "paymentCategory"),
       courier: value(p, "courier"), shipmentStatus: value(p, "shipmentStatus"),
-      delivered: value(p, "delivered"), rto: value(p, "rto"), ndr: value(p, "ndr"),
+      delivered: value(p, "delivered"), rto: value(p, "rto"), ndr: value(p, "ndr"), hadNdr: value(p, "hadNdr"),
       remittanceStatus: value(p, "remittanceStatus"), search: value(p, "search"),
     });
     return NextResponse.json({ success: true, ...result });

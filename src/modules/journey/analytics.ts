@@ -14,8 +14,8 @@ const JOURNEY_COLUMNS = [
   "resolved_campaign_id", "resolved_campaign_name", "resolved_adset_id", "resolved_adset_name",
   "resolved_ad_id", "resolved_ad_name", "hierarchy_conflict", "shiprocket_match_status",
   "shiprocket_sr_order_id", "awb", "shipment_id", "courier_name", "shiprocket_status_raw",
-  "shiprocket_current_status_raw", "delivery_outcome", "is_shipped", "is_delivered", "is_rto",
-  "is_ndr", "is_cancelled", "shipped_at", "delivered_at", "remittance_status",
+  "shiprocket_status_id", "shiprocket_current_status_raw", "shiprocket_current_status_id", "delivery_outcome", "is_shipped", "is_delivered", "is_rto",
+  "is_ndr", "had_ndr", "is_cancelled", "undelivered_reason", "undelivered_reason_code", "delivery_attempt_count", "shipped_at", "delivered_at", "remittance_status",
   "latest_remitted_at", "remitted_amount", "crf_id", "utr", "journey_stage",
   "journey_data_quality", "has_remittance_match",
   "has_exact_meta_attribution", "has_shiprocket_match",
@@ -77,6 +77,8 @@ function applyJourneyFilters(query: Query, filters: JourneyFilter): Query {
   if (filters.rto === "false") next = next.eq("is_rto", false);
   if (filters.ndr === "true") next = next.eq("is_ndr", true);
   if (filters.ndr === "false") next = next.eq("is_ndr", false);
+  if (filters.hadNdr === "true") next = next.eq("had_ndr", true);
+  if (filters.hadNdr === "false") next = next.eq("had_ndr", false);
   if (clean(filters.remittanceStatus)) next = next.eq("remittance_status", filters.remittanceStatus);
   const attribution = clean(filters.attributionStatus);
   if (attribution === "UNATTRIBUTED" || attribution === "NO_META_MATCH") next = next.eq("meta_attribution_state", "NO_META_MATCH");
@@ -97,7 +99,7 @@ async function fetchAllJourney(filters: JourneyFilter): Promise<JourneyRow[]> {
     campaignId: filters.campaignId || "", adsetId: filters.adsetId || "", adId: filters.adId || "",
     attributionStatus: filters.attributionStatus || "", paymentCategory: filters.paymentCategory || "",
     courier: filters.courier || "", shipmentStatus: filters.shipmentStatus || "",
-    delivered: filters.delivered || "", rto: filters.rto || "", ndr: filters.ndr || "",
+    delivered: filters.delivered || "", rto: filters.rto || "", ndr: filters.ndr || "", hadNdr: filters.hadNdr || "",
     remittanceStatus: filters.remittanceStatus || "", search: filters.search || "",
   });
   const cached = journeyFetchCache.get(key);
@@ -106,7 +108,7 @@ async function fetchAllJourney(filters: JourneyFilter): Promise<JourneyRow[]> {
   const promise = (async () => {
     const rows: JourneyRow[] = [];
     for (let offset = 0; offset < 20000; offset += 1000) {
-      let query = client.from("mart_order_journey_profitability").select(JOURNEY_COLUMNS);
+      let query = client.from("mart_order_journey_ndr").select(JOURNEY_COLUMNS);
       query = applyJourneyFilters(query, filters)
         .order("shopify_order_id", { ascending: true })
         .range(offset, offset + 999);
@@ -261,6 +263,7 @@ export function computeJourneySummary(rows: JourneyRow[]) {
     delivered: rows.filter((row) => row.is_delivered).length,
     rto: rows.filter((row) => row.is_rto).length,
     ndr: rows.filter((row) => row.is_ndr).length,
+    hadNdr: rows.filter((row) => row.had_ndr).length,
     deliveredNotRemitted: deliveredCod.filter((row) => row.remittance_status === "DELIVERED_NOT_REMITTED").length,
     deliveredCod: deliveredCod.length,
     remittedCod: remittedCod.length,
@@ -488,7 +491,7 @@ export async function queryProfitability(filters: JourneyFilter, level: Profitab
 export async function getJourneyDetail(shopifyOrderId: string) {
   const client = getSupabaseClient();
   const [{ data: journey, error }, { data: attribution }, { data: commerce }] = await Promise.all([
-    client.from("mart_order_journey_profitability").select(JOURNEY_COLUMNS).eq("shopify_order_id", shopifyOrderId).maybeSingle(),
+    client.from("mart_order_journey_ndr").select(JOURNEY_COLUMNS).eq("shopify_order_id", shopifyOrderId).maybeSingle(),
     client.from("shopify_meta_attribution").select(ATTRIBUTION_COLUMNS).eq("shopify_order_id", shopifyOrderId).maybeSingle(),
     client.from("shopify_orders").select("shopify_order_id,current_total_price,total_discounts,cancelled_at,cancel_reason,source_name").eq("shopify_order_id", shopifyOrderId).maybeSingle(),
   ]);
@@ -497,7 +500,7 @@ export async function getJourneyDetail(shopifyOrderId: string) {
   const journeyRow = journey as unknown as JourneyRow;
   const srOrderId = journeyRow.shiprocket_sr_order_id ? String(journeyRow.shiprocket_sr_order_id) : null;
   const [{ data: shipment }, { data: scans }, { data: remittances }] = srOrderId ? await Promise.all([
-    client.from("shiprocket_orders").select("sr_order_id,created_at_sr,order_date,awb_assigned_date,pickup_scheduled_date,delivered_date,shipment_status,current_status").eq("sr_order_id", srOrderId).maybeSingle(),
+    client.from("shiprocket_orders").select("sr_order_id,created_at_sr,order_date,awb_assigned_date,pickup_scheduled_date,delivered_date,shipment_status,current_status,current_status_id,shipment_status_id,undelivered_reason,undelivered_reason_code,delivery_attempt_count").eq("sr_order_id", srOrderId).maybeSingle(),
     client.from("shiprocket_scans").select("scan_index,scan_date,status,sr_status,sr_status_label,activity,location").eq("sr_order_id", srOrderId).order("scan_index", { ascending: true }),
     client.from("shiprocket_remittance_orders").select("crf_id,utr,remittance_date,total_adjusted_amt,match_status").eq("matched_sr_order_id", srOrderId),
   ]) : [{ data: null }, { data: [] }, { data: [] }];

@@ -13,6 +13,7 @@ export type JourneyFilter = {
   delivered?: string;
   rto?: string;
   ndr?: string;
+  hadNdr?: string;
   remittanceStatus?: string;
   search?: string;
 };
@@ -41,6 +42,7 @@ export type JourneySummary = {
   delivered: number;
   rto: number;
   ndr: number;
+  hadNdr: number;
   deliveredNotRemitted: number;
   deliveredCod: number;
   remittedCod: number;
