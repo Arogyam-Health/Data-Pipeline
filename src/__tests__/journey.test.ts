@@ -65,6 +65,34 @@ describe("customer journey and profitability", () => {
     expect(row.delivered_roas).toBe(0);
   });
 
+  it("keeps original and current Shopify values separate", () => {
+    const [row] = aggregateProfitability(
+      [{ campaign_id: "C1", adset_id: "S1", ad_id: "A1", spend: 1000, purchases: 1, purchase_value: 2000 }],
+      [{
+        shopify_order_id: "VOIDED-1", resolved_campaign_id: "C1", resolved_adset_id: "S1", resolved_ad_id: "A1",
+        meta_attribution_state: "EXACT_AD", ordered_revenue: 10140, current_revenue: 0,
+        delivered_current_revenue: 0, financial_status: "voided", is_shipped: false,
+        is_delivered: false, is_rto: false, is_ndr: false,
+      }],
+      "ad"
+    );
+    expect(row.ordered_revenue).toBe(10140);
+    expect(row.current_revenue).toBe(0);
+    expect(row.ordered_roas).toBe(10.14);
+    expect(row.current_shopify_roas).toBe(0);
+  });
+
+  it("calculates Meta ROAS from canonical purchase value divided by spend", () => {
+    const [row] = aggregateProfitability(
+      [{ campaign_id: "C1", adset_id: "S1", ad_id: "120235860129720275", spend: 2887.64, purchases: 1, purchase_value: 5940 }],
+      [],
+      "ad"
+    );
+    expect(row.meta_purchases).toBe(1);
+    expect(row.meta_purchase_value).toBe(5940);
+    expect(row.meta_roas).toBeCloseTo(5940 / 2887.64, 6);
+  });
+
   it("reports delivered COD without remittance as a visible exception", () => {
     const summary = computeJourneySummary([
       { shopify_order_id: "O1", meta_attribution_state: "NO_META_MATCH", shiprocket_match_status: "MATCHED", is_delivered: true, is_rto: false, is_ndr: false, payment_type: "COD", remittance_status: "DELIVERED_NOT_REMITTED", ordered_revenue: 1499 },

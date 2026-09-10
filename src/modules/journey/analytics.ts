@@ -9,7 +9,7 @@ import type {
 
 const JOURNEY_COLUMNS = [
   "shopify_order_id", "order_name", "order_number", "created_at_shopify", "order_date",
-  "customer_key", "currency", "ordered_revenue", "financial_status", "fulfillment_status",
+  "customer_key", "currency", "ordered_revenue", "current_revenue", "delivered_current_revenue", "financial_status", "fulfillment_status",
   "payment_type", "channel", "meta_attribution_state", "attribution_method",
   "resolved_campaign_id", "resolved_campaign_name", "resolved_adset_id", "resolved_adset_name",
   "resolved_ad_id", "resolved_ad_name", "hierarchy_conflict", "shiprocket_match_status",
@@ -106,7 +106,7 @@ async function fetchAllJourney(filters: JourneyFilter): Promise<JourneyRow[]> {
   const promise = (async () => {
     const rows: JourneyRow[] = [];
     for (let offset = 0; offset < 20000; offset += 1000) {
-      let query = client.from("mart_order_journey").select(JOURNEY_COLUMNS);
+      let query = client.from("mart_order_journey_profitability").select(JOURNEY_COLUMNS);
       query = applyJourneyFilters(query, filters)
         .order("shopify_order_id", { ascending: true })
         .range(offset, offset + 999);
@@ -369,10 +369,12 @@ export function aggregateProfitability(
         ad_id: level === "ad" ? String(source.ad_id ?? source.resolved_ad_id ?? "") || null : null,
         ad_name: level === "ad" ? String(source.ad_name ?? source.resolved_ad_name ?? "") || null : null,
         spend: 0, impressions: 0, clicks: 0, landing_page_views: 0, meta_purchases: 0,
-        meta_purchase_value: 0, orders: 0, paid_orders: 0, order_revenue: 0, shipped: 0,
-        delivered: 0, rto: 0, ndr: 0, delivered_revenue: 0, conflict_orders: 0,
+        meta_purchase_value: 0, orders: 0, paid_orders: 0, order_revenue: 0, ordered_revenue: 0,
+        current_revenue: 0, shipped: 0, delivered: 0, rto: 0, ndr: 0,
+        delivered_revenue: 0, delivered_ordered_revenue: 0, delivered_current_revenue: 0, conflict_orders: 0,
         attribution_coverage: null,
-        meta_roas: null, shopify_roas: null, delivered_roas: null,
+        meta_roas: null, ordered_roas: null, current_shopify_roas: null,
+        shopify_roas: null, delivered_roas: null, delivered_current_roas: null,
       };
       map.set(key, row);
     }
@@ -392,9 +394,18 @@ export function aggregateProfitability(
     const row = ensure(source);
     row.orders += 1;
     if (["paid", "partially_paid"].includes(String(source.financial_status || "").toLowerCase())) row.paid_orders += 1;
-    row.order_revenue += Number(source.ordered_revenue || 0);
+    const orderedRevenue = Number(source.ordered_revenue || 0);
+    const currentRevenue = Number(source.current_revenue || 0);
+    row.order_revenue += orderedRevenue;
+    row.ordered_revenue += orderedRevenue;
+    row.current_revenue += currentRevenue;
     if (source.is_shipped) row.shipped += 1;
-    if (source.is_delivered) { row.delivered += 1; row.delivered_revenue += Number(source.ordered_revenue || 0); }
+    if (source.is_delivered) {
+      row.delivered += 1;
+      row.delivered_revenue += orderedRevenue;
+      row.delivered_ordered_revenue += orderedRevenue;
+      row.delivered_current_revenue += Number(source.delivered_current_revenue ?? currentRevenue);
+    }
     if (source.is_rto) row.rto += 1;
     if (source.is_ndr) row.ndr += 1;
     if (source.hierarchy_conflict) row.conflict_orders += 1;
@@ -402,8 +413,12 @@ export function aggregateProfitability(
   return [...map.values()].map((row) => ({
     ...row,
     meta_roas: row.spend > 0 ? row.meta_purchase_value / row.spend : null,
+    ordered_roas: row.spend > 0 ? row.ordered_revenue / row.spend : null,
+    current_shopify_roas: row.spend > 0 ? row.current_revenue / row.spend : null,
+    // Legacy aliases retain their original ordered-revenue semantics.
     shopify_roas: row.spend > 0 ? row.order_revenue / row.spend : null,
     delivered_roas: row.spend > 0 ? row.delivered_revenue / row.spend : null,
+    delivered_current_roas: row.spend > 0 ? row.delivered_current_revenue / row.spend : null,
     attribution_coverage: row.orders > 0 ? (row.orders - row.conflict_orders) / row.orders : null,
   })).sort((a, b) => b.spend - a.spend || b.order_revenue - a.order_revenue);
 }
@@ -431,7 +446,9 @@ export async function queryProfitability(filters: JourneyFilter, level: Profitab
   const rows = aggregateProfitability((metaResult.data || []) as Record<string, unknown>[], journeyRows, level);
   const spend = rows.reduce((sum, row) => sum + row.spend, 0);
   const orderRevenue = rows.reduce((sum, row) => sum + row.order_revenue, 0);
+  const currentRevenue = rows.reduce((sum, row) => sum + row.current_revenue, 0);
   const deliveredRevenue = rows.reduce((sum, row) => sum + row.delivered_revenue, 0);
+  const deliveredCurrentRevenue = rows.reduce((sum, row) => sum + row.delivered_current_revenue, 0);
   return {
     level,
     cohort: {
@@ -446,15 +463,24 @@ export async function queryProfitability(filters: JourneyFilter, level: Profitab
       impressions: rows.reduce((sum, row) => sum + row.impressions, 0),
       clicks: rows.reduce((sum, row) => sum + row.clicks, 0),
       landingPageViews: rows.reduce((sum, row) => sum + row.landing_page_views, 0),
+      metaPurchases: rows.reduce((sum, row) => sum + row.meta_purchases, 0),
+      metaPurchaseValue: rows.reduce((sum, row) => sum + row.meta_purchase_value, 0),
       orders: rows.reduce((sum, row) => sum + row.orders, 0),
       orderRevenue,
+      orderedRevenue: orderRevenue,
+      currentRevenue,
       delivered: rows.reduce((sum, row) => sum + row.delivered, 0),
       rto: rows.reduce((sum, row) => sum + row.rto, 0),
       ndr: rows.reduce((sum, row) => sum + row.ndr, 0),
       deliveredRevenue,
+      deliveredOrderedRevenue: deliveredRevenue,
+      deliveredCurrentRevenue,
       metaRoas: spend > 0 ? rows.reduce((sum, row) => sum + row.meta_purchase_value, 0) / spend : null,
       shopifyRoas: spend > 0 ? orderRevenue / spend : null,
+      orderedRoas: spend > 0 ? orderRevenue / spend : null,
+      currentShopifyRoas: spend > 0 ? currentRevenue / spend : null,
       deliveredRoas: spend > 0 ? deliveredRevenue / spend : null,
+      deliveredCurrentRoas: spend > 0 ? deliveredCurrentRevenue / spend : null,
     },
   };
 }
@@ -462,7 +488,7 @@ export async function queryProfitability(filters: JourneyFilter, level: Profitab
 export async function getJourneyDetail(shopifyOrderId: string) {
   const client = getSupabaseClient();
   const [{ data: journey, error }, { data: attribution }, { data: commerce }] = await Promise.all([
-    client.from("mart_order_journey").select(JOURNEY_COLUMNS).eq("shopify_order_id", shopifyOrderId).maybeSingle(),
+    client.from("mart_order_journey_profitability").select(JOURNEY_COLUMNS).eq("shopify_order_id", shopifyOrderId).maybeSingle(),
     client.from("shopify_meta_attribution").select(ATTRIBUTION_COLUMNS).eq("shopify_order_id", shopifyOrderId).maybeSingle(),
     client.from("shopify_orders").select("shopify_order_id,current_total_price,total_discounts,cancelled_at,cancel_reason,source_name").eq("shopify_order_id", shopifyOrderId).maybeSingle(),
   ]);

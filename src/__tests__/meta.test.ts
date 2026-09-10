@@ -2,6 +2,8 @@ import { ADD_TO_CART_ACTION_TYPES, CORE_FIELDS, PURCHASE_ACTION_TYPES } from "..
 import {
   firstActionValue,
   firstRoasValue,
+  canonicalPurchaseCount,
+  canonicalPurchaseValue,
   mapParityActions,
   normalizeAllActions,
   safeRatio,
@@ -284,9 +286,23 @@ describe("Meta insight transformation and action mappings", () => {
 
   it("preserves purchase / website purchase / value mappings", () => {
     const mapped = mapParityActions(sampleInsight());
-    expect(mapped.purchases).toBe(5);
+    expect(mapped.purchases).toBe(2);
     expect(mapped.websitePurchases).toBe(2);
     expect(mapped.purchaseValue).toBe(200);
+  });
+
+  it("selects one canonical purchase alias by priority instead of summing aliases", () => {
+    const actions = [
+      { action_type: "purchase", value: 1 },
+      { action_type: "omni_purchase", value: 1 },
+      { action_type: "offsite_conversion.fb_pixel_purchase", value: 1 },
+    ];
+    const values = actions.map((action) => ({ ...action, value: 5940 }));
+    expect(canonicalPurchaseCount(actions)).toBe(1);
+    expect(canonicalPurchaseValue(values)).toBe(5940);
+    expect(canonicalPurchaseCount([{ action_type: "omni_purchase", value: 2 }, { action_type: "purchase", value: 1 }])).toBe(2);
+    expect(canonicalPurchaseCount([{ action_type: "purchase", value: 1 }])).toBe(1);
+    expect(canonicalPurchaseCount([{ action_type: "add_to_cart", value: 9 }])).toBeNull();
   });
 
   it("preserves add-to-cart, checkout, checkout value, LPV, messaging, registration", () => {

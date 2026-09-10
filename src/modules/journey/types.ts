@@ -70,6 +70,14 @@ export type ProfitabilityRow = {
   meta_purchase_value: number;
   orders: number;
   paid_orders: number;
+  ordered_revenue: number;
+  current_revenue: number;
+  delivered_ordered_revenue: number;
+  delivered_current_revenue: number;
+  ordered_roas: number | null;
+  current_shopify_roas: number | null;
+  delivered_current_roas: number | null;
+  // Backward-compatible ordered-revenue aliases.
   order_revenue: number;
   shipped: number;
   delivered: number;

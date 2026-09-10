@@ -48,3 +48,7 @@ supabase/.temp/
 *.tsbuildinfo
 next-env.d.ts
 shiprocket data - Shiprocket Orders.csv
+meta_2026-08-20.json
+meta_query.json
+shopify_2026-08-20.json
+shopify_query.json
