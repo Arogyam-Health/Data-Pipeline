@@ -149,6 +149,7 @@ const DEFAULT_COLUMNS = [
   "awb",
   "shipment_status",
   "current_status",
+  "delivery_outcome",
   "courier_name",
   "customer_name_shopify",
   "customer_phone_shopify",
@@ -180,13 +181,19 @@ const MONO_COLUMNS = new Set([
 
 const COLUMN_STORAGE_KEY = "shiprocket-visible-columns-v3";
 
+const DISPLAY_COLUMN_LABELS: Record<string, string> = {
+  shipment_status: "Shiprocket Status",
+  current_status: "Shiprocket Current Status",
+  delivery_outcome: "Delivery Outcome",
+};
+
 const SHORTCUTS: Array<{ label: string; filters: AppliedFilter[] }> = [
   { label: "7 days", filters: [{ field: "last_webhook_sync_at", operator: "last_7_days" }] },
   { label: "30 days", filters: [{ field: "last_webhook_sync_at", operator: "last_30_days" }] },
-  { label: "Delivered", filters: [{ field: "status_bucket", operator: "eq", value: "delivered" }] },
-  { label: "In Transit", filters: [{ field: "status_bucket", operator: "eq", value: "in_transit" }] },
-  { label: "RTO", filters: [{ field: "status_bucket", operator: "eq", value: "rto" }] },
-  { label: "NDR", filters: [{ field: "status_bucket", operator: "eq", value: "ndr" }] },
+  { label: "Delivered", filters: [{ field: "delivery_outcome", operator: "eq", value: "DELIVERED" }] },
+  { label: "In Transit", filters: [{ field: "delivery_outcome", operator: "eq", value: "IN_TRANSIT" }] },
+  { label: "RTO", filters: [{ field: "delivery_outcome", operator: "eq", value: "RTO" }] },
+  { label: "NDR", filters: [{ field: "delivery_outcome", operator: "eq", value: "NDR_OPEN" }] },
   { label: "COD", filters: [{ field: "payment_bucket", operator: "eq", value: "COD" }] },
   { label: "Shopify Matched", filters: [{ field: "shopify_matched", operator: "true" }] },
   { label: "No Remittance", filters: [{ field: "remittance_match_status", operator: "eq", value: "unmatched" }] },
@@ -250,7 +257,7 @@ function renderCell(col: string, value: unknown): ReactNode {
   if (col === "pabbly_status") {
     return <span className={pabblyBadgeClass(value)}>{String(value)}</span>;
   }
-  if (col.includes("status") || col === "status_bucket") {
+  if (col.includes("status") || col === "status_bucket" || col === "delivery_outcome") {
     return <span className={statusBadgeClass(value)}>{String(value)}</span>;
   }
   if (col === "order_total" || col.includes("settlement") || col.includes("amount")) {
@@ -346,7 +353,14 @@ export default function ShiprocketDashboardPage() {
   useEffect(() => {
     try {
       const stored = localStorage.getItem(COLUMN_STORAGE_KEY);
-      if (stored) setVisible(JSON.parse(stored));
+      if (stored) {
+        const storedColumns = JSON.parse(stored) as string[];
+        const currentStatusIndex = storedColumns.indexOf("current_status");
+        if (!storedColumns.includes("delivery_outcome")) {
+          storedColumns.splice(currentStatusIndex >= 0 ? currentStatusIndex + 1 : storedColumns.length, 0, "delivery_outcome");
+        }
+        setVisible(storedColumns);
+      }
     } catch {
       /* ignore */
     }
@@ -1125,7 +1139,7 @@ export default function ShiprocketDashboardPage() {
                         setSortDir((d) => (sortField === col && d === "desc" ? "asc" : "desc"));
                       }}
                     >
-                      {fieldMap.get(col)?.label || col}
+                      {DISPLAY_COLUMN_LABELS[col] || fieldMap.get(col)?.label || col}
                       {sortField === col ? (sortDir === "desc" ? " ↓" : " ↑") : ""}
                     </th>
                   ))}

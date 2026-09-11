@@ -359,26 +359,48 @@ export async function queryShiprocketOrders(request: ShiprocketFilterRequest): P
   const from = (request.page - 1) * request.pageSize;
   const to = from + request.pageSize - 1;
   const sort = request.sort[0] ?? { field: "last_webhook_sync_at", direction: "desc" as const };
-
-  let query = supabase
-    .from("shiprocket_order_explorer")
-    .select(LIST_COLUMNS, { count: "exact" });
-
-  query = applyAllClauses(query, request);
-  query = query.order(sort.field, { ascending: sort.direction === "asc", nullsFirst: false });
-  query = query.range(from, to);
-
-  const { data, error, count } = await query;
-  if (error) {
-    throw new Error(`Shiprocket query failed: ${error.message}`);
+  const canonicalStatusFilters = request.filters.filter((filter) =>
+    "field" in filter && (filter.field === "status_bucket" || filter.field === "delivery_outcome")
+  );
+  const dbRequest = canonicalStatusFilters.length
+    ? { ...request, filters: request.filters.filter((filter) => !("field" in filter && (filter.field === "status_bucket" || filter.field === "delivery_outcome"))) }
+    : request;
+  const rawRows: Record<string, unknown>[] = [];
+  let count: number | null = null;
+  if (canonicalStatusFilters.length) {
+    for (let offset = 0; offset < 20000; offset += 1000) {
+      let pageQuery = supabase.from("shiprocket_order_explorer").select(LIST_COLUMNS, { count: "exact" });
+      pageQuery = applyAllClauses(pageQuery, dbRequest);
+      pageQuery = pageQuery.order(sort.field, { ascending: sort.direction === "asc", nullsFirst: false }).range(offset, offset + 999);
+      const { data, error, count: pageCount } = await pageQuery;
+      if (error) throw new Error(`Shiprocket query failed: ${error.message}`);
+      rawRows.push(...((data || []) as unknown as Record<string, unknown>[]));
+      count = pageCount ?? count;
+      if (!data || data.length < 1000) break;
+    }
+  } else {
+    let query = supabase.from("shiprocket_order_explorer").select(LIST_COLUMNS, { count: "exact" });
+    query = applyAllClauses(query, request);
+    query = query.order(sort.field, { ascending: sort.direction === "asc", nullsFirst: false }).range(from, to);
+    const { data, error, count: pageCount } = await query;
+    if (error) throw new Error(`Shiprocket query failed: ${error.message}`);
+    rawRows.push(...((data || []) as unknown as Record<string, unknown>[]));
+    count = pageCount ?? null;
   }
 
-  const canonicalRows = await canonicalizeExplorerRows((data as unknown as Array<Record<string, unknown>> || []));
+  const canonicalRows = await canonicalizeExplorerRows(rawRows);
+  const filteredCanonicalRows = canonicalStatusFilters.length
+    ? canonicalRows.filter((row) => canonicalStatusFilters.every((filter) => {
+      const expected = String(("value" in filter ? filter.value : "") || "").toUpperCase();
+      return String(row.delivery_outcome || "").toUpperCase() === expected;
+    }))
+    : canonicalRows;
+  const pageRows = canonicalStatusFilters.length ? filteredCanonicalRows.slice(from, to + 1) : filteredCanonicalRows;
   return {
-    rows: canonicalRows.map((canonical) => {
+    rows: pageRows.map((canonical) => {
       return { ...canonical, reconciliation_status: reconciliationStatus(canonical) };
     }) as unknown as ShiprocketExplorerRow[],
-    total: count ?? 0,
+    total: canonicalStatusFilters.length ? filteredCanonicalRows.length : count ?? 0,
     page: request.page,
     pageSize: request.pageSize,
   };
