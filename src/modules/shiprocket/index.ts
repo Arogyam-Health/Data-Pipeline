@@ -25,6 +25,7 @@ export {
   loadPabblyPreview,
   queryShiprocketOverview,
   queryShiprocketRemittances,
+  queryRemittanceJourneyReconciliation,
   getShiprocketRemittanceDetail,
   reconciliationStatus,
 } from "./query";

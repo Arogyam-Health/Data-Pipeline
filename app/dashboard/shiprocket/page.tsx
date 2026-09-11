@@ -297,11 +297,19 @@ export default function ShiprocketDashboardPage() {
   const [showRaw, setShowRaw] = useState(false);
   const [remittances, setRemittances] = useState<{
     summary: Record<string, unknown> | null;
+    importSummary: Record<string, unknown> | null;
     crfs: Array<Record<string, unknown>>;
     imports: Array<Record<string, unknown>>;
+    rows: Array<Record<string, unknown>>;
+    exceptions: Array<Record<string, unknown>>;
+    operationalScope: { rows: number; outsideScope: number };
+    scope: { type: string; importId?: string; fileName?: string };
   } | null>(null);
   const [importing, setImporting] = useState(false);
-  const [importResult, setImportResult] = useState<string>("");
+  const [, setImportResult] = useState<Record<string, unknown> | null>(null);
+  const [importError, setImportError] = useState<string>("");
+  const [remittanceImportId, setRemittanceImportId] = useState("LATEST");
+  const [selectedRemittanceCrf, setSelectedRemittanceCrf] = useState<string | null>(null);
   const columnPopoverRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const requestId = useRef(0);
@@ -397,7 +405,7 @@ export default function ShiprocketDashboardPage() {
           body: JSON.stringify(payload),
         }),
         fetch("/api/shiprocket/quality", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: controller.signal }),
-        fetch("/api/shiprocket/remittances", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: controller.signal }),
+        fetch("/api/shiprocket/remittances", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload, ...(remittanceImportId !== "LATEST" ? { remittanceImportId } : {}) }), signal: controller.signal }),
       ]);
       const ordersBody = await ordersRes.json();
       const overviewBody = await overviewRes.json();
@@ -405,6 +413,7 @@ export default function ShiprocketDashboardPage() {
       const remBody = await remRes.json();
       if (!ordersRes.ok) throw new Error(ordersBody.error || "Query failed");
       if (!overviewRes.ok) throw new Error(overviewBody.error || "Overview failed");
+      if (!remRes.ok) throw new Error(remBody.error || "Remittance query failed");
       if (currentRequest === requestId.current) {
         setRows(ordersBody.rows || []);
         setTotal(ordersBody.total || 0);
@@ -420,7 +429,7 @@ export default function ShiprocketDashboardPage() {
     } finally {
       if (currentRequest === requestId.current) setLoading(false);
     }
-  }, [payload]);
+  }, [payload, remittanceImportId]);
 
   useEffect(() => {
     load();
@@ -527,7 +536,8 @@ export default function ShiprocketDashboardPage() {
 
   async function uploadReport(file: File) {
     setImporting(true);
-    setImportResult("");
+    setImportResult(null);
+    setImportError("");
     try {
       const form = new FormData();
       form.append("file", file);
@@ -538,15 +548,11 @@ export default function ShiprocketDashboardPage() {
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || "Import failed");
-      setImportResult(
-        `Imported ${body.crfRowsUpserted} CRFs, ${body.awbRowsUpserted} AWB rows, matched ${body.matchedOrders}, unmatched ${body.unmatchedOrders}, canonical orders ${body.canonicalOrdersTotal ?? 0}.` +
-          (body.sampleUnmatched?.length
-            ? ` Sample unmatched: ${JSON.stringify(body.sampleUnmatched.slice(0, 2))}`
-            : "")
-      );
+      setImportResult(body);
+      setRemittanceImportId(String(body.importId));
       await load();
     } catch (err) {
-      setImportResult(err instanceof Error ? err.message : "Import failed");
+      setImportError(err instanceof Error ? err.message : "Import failed");
     } finally {
       setImporting(false);
     }
@@ -812,11 +818,6 @@ export default function ShiprocketDashboardPage() {
                   <p className="sr-mini-metric-label">Remittance reconciliation</p>
                   <p className="sr-mini-metric-value">{String(remittanceQuality?.status || "NO_REMITTANCE_DATA").replaceAll("_", " ")}</p>
                 </div>
-                {Boolean(remittanceQuality?.data_available) && <>
-                  <div><p className="sr-mini-metric-label">Remittance matched</p><p className="sr-mini-metric-value">{dash(remittanceQuality?.matched)}</p></div>
-                  <div><p className="sr-mini-metric-label">Remittance unmatched</p><p className="sr-mini-metric-value">{dash(remittanceQuality?.unmatched)}</p></div>
-                  <div><p className="sr-mini-metric-label">Remittance match rate</p><p className="sr-mini-metric-value">{remittanceQuality?.match_rate == null ? "NOT AVAILABLE" : `${remittanceQuality.match_rate}%`}</p></div>
-                </>}
               </div>
               <p className="sr-subtitle" style={{ marginBottom: "0.75rem" }}>
                 {remittanceQuality?.data_available ? "Actual remittance rows for the selected scope." : "No remittance file covers the selected period. Upload a Shiprocket Billing / CRF-UTR XLS/XLSX report to enable reconciliation."}
@@ -846,12 +847,25 @@ export default function ShiprocketDashboardPage() {
                   {importing ? "Importing…" : "Import"}
                 </button>
               </div>
-              {importResult && <p className="sr-subtitle" style={{ marginTop: "0.5rem" }}>{importResult}</p>}
+              {importError && <p className="sr-subtitle sr-error" style={{ marginTop: "0.5rem" }}>{importError}</p>}
+              <label className="sr-import-scope">Remittance scope
+                <select value={remittanceImportId === "LATEST" ? String(remittances?.scope?.importId || "LATEST") : remittanceImportId} onChange={(e) => { setSelectedRemittanceCrf(null); setRemittanceImportId(e.target.value); }}>
+                  {remittances?.imports?.filter((row) => row.status === "completed").map((row) => <option key={String(row.id)} value={String(row.id)}>{dash(row.file_name)} · {dash(row.completed_at || row.started_at)}</option>)}
+                  <option value="ALL">All imports / cumulative canonical</option>
+                </select>
+              </label>
+              {remittances?.scope?.type === "IMPORT" && remittances.rows?.length > 0 && <details className="sr-import-detail">
+                <summary>View {remittances.rows.length} rows in this import</summary>
+                <div className="sr-table-scroll"><table className="sr-table"><thead><tr><th>CRF</th><th>AWB</th><th>Order ID</th><th>SR Order</th><th>Status</th><th>Method</th><th>Delivered</th><th>Remittance date</th><th>UTR</th><th>Order value</th><th>Adjustment</th></tr></thead><tbody>{remittances.rows.filter((row) => !selectedRemittanceCrf || String(row.crf_id) === selectedRemittanceCrf).map((row, index) => <tr key={`${String(row.id)}-${index}`}><td>{dash(row.crf_id)}</td><td>{dash(row.awb)}</td><td>{dash(row.order_id)}</td><td>{dash(row.matched_sr_order_id)}</td><td>{dash(row.match_status)}</td><td>{dash(row.match_method)}</td><td>{dash(row.delivered_date)}</td><td>{dash(row.remittance_date)}</td><td>{dash(row.utr)}</td><td>{row.order_value == null || row.order_value === "" ? "Value NOT AVAILABLE" : money(row.order_value)}</td><td>{row.total_adjusted_amt == null || row.total_adjusted_amt === "" ? "NOT AVAILABLE" : money(row.total_adjusted_amt)}</td></tr>)}</tbody></table></div>
+              </details>}
+              {remittances?.scope?.type === "IMPORT" && <div className="sr-import-scope-note"><strong>Operational scope (separate from selected file):</strong> {remittances.rows.length} rows in this file · {remittances.operationalScope.rows} in the current Shiprocket filter · {remittances.operationalScope.outsideScope} outside the operational filter. File counts are not reduced by the operational filter.</div>}
+              {remittances?.scope?.type === "IMPORT" && remittances.importSummary && <div className="sr-import-result"><strong>Selected file reconciliation</strong><small>Scope: selected remittance file — {dash(remittances.importSummary.imported_rows)} rows</small><div className="sr-mini-metrics"><div><p className="sr-mini-metric-label">Rows in file</p><p className="sr-mini-metric-value">{dash(remittances.importSummary.imported_rows)}</p></div><div><p className="sr-mini-metric-label">Matched</p><p className="sr-mini-metric-value">{dash(remittances.importSummary.matched)}</p></div><div><p className="sr-mini-metric-label">Unmatched</p><p className="sr-mini-metric-value">{dash(remittances.importSummary.unmatched)}</p></div><div><p className="sr-mini-metric-label">Ambiguous</p><p className="sr-mini-metric-value">{dash(remittances.importSummary.ambiguous)}</p></div><div><p className="sr-mini-metric-label">Matched + delivered</p><p className="sr-mini-metric-value">{dash(remittances.importSummary.matched_delivered)}</p></div><div><p className="sr-mini-metric-label">Matched + not delivered</p><p className="sr-mini-metric-value">{dash(remittances.importSummary.matched_not_delivered)}</p></div><div><p className="sr-mini-metric-label">Delivered COD + remittance</p><p className="sr-mini-metric-value">{dash(remittances.importSummary.matched_delivered_cod)}</p></div><div><p className="sr-mini-metric-label">Delivered non-COD + remittance</p><p className="sr-mini-metric-value">{dash(remittances.importSummary.matched_delivered_non_cod)}</p></div><div><p className="sr-mini-metric-label">Delivered unknown + remittance</p><p className="sr-mini-metric-value">{dash(remittances.importSummary.matched_delivered_unknown)}</p></div><div><p className="sr-mini-metric-label">Match rate</p><p className="sr-mini-metric-value">{remittances.importSummary.match_rate == null ? "—" : `${remittances.importSummary.match_rate}%`}</p></div></div></div>}
+              {remittances?.scope?.type === "IMPORT" && remittances.exceptions?.length > 0 && <details open className="sr-import-detail"><summary>Exceptions requiring review ({remittances.exceptions.length})</summary><div className="sr-table-scroll"><table className="sr-table"><thead><tr><th>Order ID</th><th>AWB</th><th>SR Order</th><th>Status</th><th>Delivered</th><th>CRF</th><th>UTR</th><th>Remittance date</th><th>Reason</th></tr></thead><tbody>{remittances.exceptions.map((row, index) => <tr key={`${String(row.id)}-exception-${index}`}><td>{dash(row.order_id)}</td><td>{dash(row.awb)}</td><td>{dash(row.matched_sr_order_id)}</td><td>{dash(row.current_status || row.shipment_status)}</td><td>{dash(row.delivered_date)}</td><td>{dash(row.crf_id)}</td><td>{dash(row.utr)}</td><td>{dash(row.remittance_date)}</td><td>{dash(row.exception_reason)}</td></tr>)}</tbody></table></div></details>}
               {(remittances?.imports || []).length > 0 && (
                 <div className="sr-import-history">
                   <p className="sr-mini-metric-label" style={{ marginBottom: "0.35rem" }}>Last import</p>
                   {(remittances?.imports || []).slice(0, 3).map((row) => (
-                    <div key={String(row.id)} className="sr-import-item">
+                    <button type="button" key={String(row.id)} className="sr-import-item" onClick={() => setRemittanceImportId(String(row.id))}>
                       <span>{dash(row.file_name)}</span>
                       <span className={String(row.status).toLowerCase().includes("complete") ? "sr-status-success" : "sr-status-badge sr-status-default"}>
                         {dash(row.status)}
@@ -859,7 +873,10 @@ export default function ShiprocketDashboardPage() {
                       <span>{dash(row.crf_rows_read ?? row.crf_rows_upserted)} CRF</span>
                       <span>{dash(row.awb_rows_read ?? row.awb_rows_upserted)} AWBs</span>
                       <span>{dash(row.matched_orders)} matched</span>
-                    </div>
+                      <span>{dash(row.ambiguous_orders)} ambiguous</span>
+                      <span>{dash(row.matched_by_awb)} AWB / {dash(row.matched_by_order_id)} Order ID / {dash(row.matched_by_shopify_format)} Shopify</span>
+                      {Boolean(row.error_message) && <span className="sr-error">{dash(row.error_message)}</span>}
+                    </button>
                   ))}
                 </div>
               )}
@@ -867,25 +884,8 @@ export default function ShiprocketDashboardPage() {
           </div>
         </section>
 
-        {/* CRF settlements */}
-        {overview?.remittanceDataAvailable && (
-          <section className="sr-section">
-            <div className="sr-card">
-              <h3 className="sr-card-title">Universal delivery reconciliation</h3>
-              <p className="sr-subtitle">Remittance matching is independent of payment classification.</p>
-              <div className="sr-mini-metrics">
-                <div><p className="sr-mini-metric-label">Delivered orders</p><p className="sr-mini-metric-value">{overview.delivered}</p></div>
-                <div><p className="sr-mini-metric-label">Delivered + remitted</p><p className="sr-mini-metric-value">{overview.deliveredOrdersWithRemittance ?? overview.deliveredRemittedOrders}</p></div>
-                <div><p className="sr-mini-metric-label">Delivered + not remitted</p><p className="sr-mini-metric-value">{overview.deliveredOrdersWithoutRemittance ?? overview.deliveredNotRemittedOrders}</p></div>
-                <div><p className="sr-mini-metric-label">Remitted but not delivered</p><p className="sr-mini-metric-value">{overview.remittedNotDeliveredOrders}</p></div>
-              </div>
-            </div>
-          </section>
-        )}
-
         <section className="sr-section">
-          <h2 className="sr-section-title">Settlements</h2>
-          {!overview?.remittanceDataAvailable ? <div className="sr-card sr-empty-state"><h3 className="sr-card-title">No remittance data available for this period</h3><p className="sr-subtitle">Shipment and delivery data are available. Upload a Shiprocket Billing / CRF-UTR XLS/XLSX report covering the selected period to enable COD settlement reconciliation.</p><div className="sr-import-row"><button type="button" className="sr-btn sr-btn-secondary" disabled={importing} onClick={() => fileInputRef.current?.click()}>Choose File</button><button type="button" className="sr-btn sr-btn-primary" disabled={importing} onClick={() => fileInputRef.current?.click()}>{importing ? "Importing…" : "Import"}</button></div></div> : <div className="sr-card"><h3 className="sr-card-title">Settlement summary</h3><div className="sr-mini-metrics"><div><p className="sr-mini-metric-label">Remittance rows</p><p className="sr-mini-metric-value">{overview.remittanceRowsTotal}</p></div><div><p className="sr-mini-metric-label">Matched rows</p><p className="sr-mini-metric-value">{overview.remittanceMatched}</p></div><div><p className="sr-mini-metric-label">Unmatched rows</p><p className="sr-mini-metric-value">{overview.remittanceUnmatched}</p></div><div><p className="sr-mini-metric-label">CRFs / UTRs</p><p className="sr-mini-metric-value">{overview.distinctCrfs} / {overview.distinctUtrs}</p></div><div><p className="sr-mini-metric-label">Settlement value</p><p className="sr-mini-metric-value">{overview.settlementAmountAvailable ? money(overview.orderSettlementValue) : "NOT AVAILABLE"}</p></div></div><h3 className="sr-card-title" style={{ marginTop: "1rem" }}>Delivery reconciliation</h3><div className="sr-mini-metrics"><div><p className="sr-mini-metric-label">Delivered COD</p><p className="sr-mini-metric-value">{overview.deliveredCodOrders}</p></div><div><p className="sr-mini-metric-label">Delivered + remitted</p><p className="sr-mini-metric-value">{overview.deliveredRemittedOrders}</p></div><div><p className="sr-mini-metric-label">Delivered + not remitted</p><p className="sr-mini-metric-value">{overview.deliveredNotRemittedOrders}</p></div><div><p className="sr-mini-metric-label">Remitted but not delivered</p><p className="sr-mini-metric-value">{overview.remittedNotDeliveredOrders}</p></div></div></div>}
+          <h2 className="sr-section-title">CRF Settlements</h2>
           {overview?.remittanceDataAvailable &&
           <div className="sr-card">
             <h3 className="sr-card-title">CRF Settlements</h3>
@@ -902,12 +902,8 @@ export default function ShiprocketDashboardPage() {
                     <th>UTR</th>
                     <th>Date</th>
                     <th>Status</th>
-                    <th>Reconciliation</th>
                     <th className="sr-num">Amount</th>
                     <th className="sr-num">AWBs</th>
-                    <th className="sr-num">Matched</th>
-                    <th className="sr-num">Delivered</th>
-                    <th className="sr-num">Not delivered</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -917,10 +913,7 @@ export default function ShiprocketDashboardPage() {
                         <button
                           type="button"
                           className="sr-table-link sr-mono"
-                          onClick={() => {
-                            setPage(1);
-                            setAppliedFilters([{ field: "latest_crf_id", operator: "eq", value: row.crf_id }]);
-                          }}
+                          onClick={() => setSelectedRemittanceCrf(String(row.crf_id))}
                         >
                           {dash(row.crf_id)}
                         </button>
@@ -941,17 +934,13 @@ export default function ShiprocketDashboardPage() {
                       <td>
                         <span className={statusBadgeClass(row.status)}>{dash(row.status)}</span>
                       </td>
-                      <td>{Number(row.matched || 0) === Number(row.awb_count || 0) && Number(row.awb_count || 0) > 0 ? "FULLY RECONCILED" : Number(row.matched || 0) === 0 ? "UNMATCHED" : "PARTIALLY RECONCILED"}</td>
                       <td className="sr-num">{row.settlement_amount == null || row.settlement_amount === "" ? "NOT AVAILABLE" : money(row.settlement_amount)}</td>
                       <td className="sr-num">{dash(row.awb_count)}</td>
-                      <td className="sr-num">{dash(row.matched)}</td>
-                      <td className="sr-num">{dash(row.delivered)}</td>
-                      <td className="sr-num">{dash(row.not_delivered)}</td>
                     </tr>
                   ))}
                   {(remittances?.crfs || []).length === 0 && (
                     <tr>
-                      <td colSpan={10} className="sr-muted" style={{ textAlign: "center" }}>
+                      <td colSpan={7} className="sr-muted" style={{ textAlign: "center" }}>
                         No remittance data available for this period. Upload a Shiprocket Billing / CRF-UTR report to enable settlement reconciliation.
                       </td>
                     </tr>
@@ -1221,9 +1210,11 @@ export default function ShiprocketDashboardPage() {
                     <DrawerField label="Shipment Status" value={detail.order?.shipment_status} />
                     <DrawerField label="Current Status" value={detail.order?.current_status} />
                     <DrawerField label="Status Bucket" value={detail.order?.status_bucket} />
+                    <DrawerField label="Canonical delivery source" value={detail.order?.canonical_delivery_source ? String(detail.order.canonical_delivery_source) : null} />
                     <DrawerField label="Courier" value={detail.order?.courier_name} />
                     <DrawerField label="ETD" value={detail.order?.etd} />
                     <DrawerField label="Delivered Date" value={detail.order?.delivered_date} />
+                    {Boolean(detail.order?.status_conflict) && <p className="sr-subtitle sr-error">Status conflict: top-level Shiprocket status is {detail.order?.current_status == null ? "—" : String(detail.order.current_status)}, but the scan timeline contains a delivered event. Canonical status: DELIVERED.</p>}
                   </DrawerSection>
                   <DrawerSection title="Scan Timeline">
                     {(detail.scans || []).length === 0 ? (
@@ -1254,7 +1245,7 @@ export default function ShiprocketDashboardPage() {
                   </DrawerSection>
                   <DrawerSection title="Remittance / Settlement">
                     {(detail.remittances || []).length === 0 ? (
-                      <p className="sr-subtitle">No remittance match.</p>
+                      <p className="sr-subtitle">No remittance match found for this Shiprocket order. Review the import exceptions for unmatched or ambiguous source rows.</p>
                     ) : (
                       (detail.remittances || []).map((row, idx) => {
                         const rec = row as Record<string, unknown>;
@@ -1263,6 +1254,9 @@ export default function ShiprocketDashboardPage() {
                           <div key={idx} style={{ marginBottom: "0.75rem" }}>
                             <DrawerField label="CRF" value={rec.crf_id} mono />
                             <DrawerField label="UTR" value={rec.utr} mono />
+                            <DrawerField label="Match status" value={rec.match_status} />
+                            <DrawerField label="Match method" value={rec.match_method} />
+                            <DrawerField label="Match reason" value={rec.match_reason_code} />
                             <DrawerField label="Type" value={rec.remittance_type} />
                             <DrawerField label="Order Settlement" value={money(rec.order_value)} />
                             <DrawerField label="CRF Amount" value={money(crf?.remittance_amount)} />

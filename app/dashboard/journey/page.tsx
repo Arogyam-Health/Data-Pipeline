@@ -14,6 +14,7 @@ type Summary = {
   channelBreakdown: Record<string, number>; metaBreakdown: Record<string, number>;
 };
 type Detail = { order: Row; attribution: Record<string, unknown> | null; shipment: Record<string, unknown> | null; remittances: Record<string, unknown>[]; timeline: Record<string, unknown>[] };
+type RemittanceReconciliation = { importId: string; crfId?: string; summary: Record<string, number>; rows: Array<Record<string, unknown>> };
 
 const today = new Date().toISOString().slice(0, 10);
 const daysAgo = (days: number) => new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
@@ -66,6 +67,7 @@ export default function JourneyDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [operationalLookup, setOperationalLookup] = useState<Record<string, unknown>[]>([]);
+  const [remittanceReconciliation, setRemittanceReconciliation] = useState<RemittanceReconciliation | null>(null);
 
   const params = useMemo(() => {
     const p = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
@@ -81,17 +83,25 @@ export default function JourneyDashboard() {
         const value = filters[key];
         if (value) profitParams.set(key, value);
       });
-      const [ordersResponse, profitResponse, freshnessResponse] = await Promise.all([
+      const [ordersResponse, profitResponse, freshnessResponse, remittanceResponse] = await Promise.all([
         fetch(`/api/journey/orders?${params}`),
         fetch(`/api/journey/profitability?${profitParams}`),
         fetch("/api/journey/freshness"),
+        fetch("/api/shiprocket/remittances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ filters: [], search: "", page: 1, pageSize: 1, sort: [], remittanceImportId: "ALL" }) }),
       ]);
-      const [orders, profit, fresh] = await Promise.all([ordersResponse.json(), profitResponse.json(), freshnessResponse.json()]);
+      const [orders, profit, fresh, remittances] = await Promise.all([ordersResponse.json(), profitResponse.json(), freshnessResponse.json(), remittanceResponse.json()]);
       if (!ordersResponse.ok) throw new Error(orders.error || "Order journey request failed");
       if (!profitResponse.ok) throw new Error(profit.error || "Profitability request failed");
       setRows(orders.rows || []); setTotal(orders.total || 0); setOperationalLookup(orders.operationalLookup || []); setSummary(orders.outcomeSummary || orders.summary || EMPTY_SUMMARY); setCohortSummary(orders.cohortSummary || orders.summary || EMPTY_SUMMARY);
       setProfitRows(profit.rows || []); setProfitTotals(profit.totals || {}); setProfitScope({ cohort: profit.cohort, meta_reporting: profit.meta_reporting });
       if (freshnessResponse.ok) setFreshness(fresh);
+      if (remittanceResponse.ok) {
+        const selected = (remittances.imports || []).find((item: Record<string, unknown>) => item.status === "completed" && Number(item.awb_rows_read) === 60);
+        if (selected?.id) {
+          const bridge = await fetch(`/api/journey/remittance-reconciliation?importId=${encodeURIComponent(String(selected.id))}&from=${encodeURIComponent(filters.from || "")}&to=${encodeURIComponent(filters.to || "")}`);
+          if (bridge.ok) setRemittanceReconciliation(await bridge.json());
+        }
+      }
     } catch (err) { setError(err instanceof Error ? err.message : "Journey dashboard failed"); }
     finally { setLoading(false); }
   }, [params, level, filters]);
@@ -139,6 +149,7 @@ export default function JourneyDashboard() {
 
       {error && <div className="journey-error">{error}</div>}
       {operationalLookup.length > 0 && <section className="journey-scope-note"><strong>Operational lookup:</strong> no Shopify journey row matched this exact identifier, but a Shiprocket record was found. {operationalLookup.map((item, index) => <span key={index}> {text(item.result_type)} · SR {text(item.sr_order_id)} · AWB {text(item.awb)} · {text(item.status_bucket || item.current_status)}{item.remittance ? ` · CRF ${text((item.remittance as Record<string, unknown>).crf_id)}` : ""}</span>)} This is a fulfilment/settlement result and is not inserted into the one-row-per-Shopify-order mart.</section>}
+      {remittanceReconciliation && <section className="journey-scope-note"><strong>Remittance reconciliation</strong> · CRF {text(remittanceReconciliation.crfId)} · Source rows {number(remittanceReconciliation.summary.sourceRows)} · Shiprocket/Shopify matched {number(remittanceReconciliation.summary.shopifyMatched)} · Journey rows {number(remittanceReconciliation.summary.journeyRowsExist)} · Canonical delivered {number(remittanceReconciliation.summary.canonicalDelivered)} · Journey displayed as remitted {number(remittanceReconciliation.summary.finalDeliveredCodRemitted)} · Needs review {number(remittanceReconciliation.summary.needsReview)}<details><summary>View discrepancies</summary><div className="table-scroll"><table className="orders-table"><thead><tr><th>Order</th><th>AWB</th><th>SR Order</th><th>Delivery</th><th>Payment</th><th>Shopify</th><th>Journey cohort</th><th>Journey status</th><th>CRF</th><th>UTR</th><th>Reason</th></tr></thead><tbody>{remittanceReconciliation.rows.filter((row) => !row.includedInJourney).map((row, index) => { const source = row.source as Record<string, unknown>; const journey = row.journey as Record<string, unknown> | null; const delivery = row.delivery as Record<string, unknown> | null; return <tr key={index}><td>{text(source.order_id)}</td><td>{text(source.awb)}</td><td>{text(source.matched_sr_order_id)}</td><td>{text(delivery?.outcome)}</td><td>{text(row.paymentType)}</td><td>{row.hasShopifyMatch ? "MATCHED" : "NO MATCH"}</td><td>{row.insideJourneyCohort ? "YES" : "NO"}</td><td>{text(journey?.remittance_status)}</td><td>{text(source.crf_id)}</td><td>{text(source.utr)}</td><td>{text(row.finalReason)}</td></tr>; })}</tbody></table></div></details></section>}
 
       <section className="journey-filters">
         <label>From<input type="date" value={filters.from || ""} onChange={(e) => update("from", e.target.value)} /></label>

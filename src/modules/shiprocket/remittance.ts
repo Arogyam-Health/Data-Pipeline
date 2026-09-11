@@ -44,6 +44,12 @@ export const CRF_REQUIRED_HEADERS = [
 export const MAX_REMITTANCE_UPLOAD_BYTES = 8 * 1024 * 1024;
 
 export type RemittanceMatchStatus = "matched" | "unmatched" | "ambiguous";
+export type RemittanceMatchMethod = "AWB" | "ORDER_ID" | "SHOPIFY_FORMAT" | "NONE";
+export type RemittanceMatchReasonCode =
+  | "MATCHED_BY_AWB" | "MATCHED_BY_ORDER_ID" | "MATCHED_BY_SHOPIFY_FORMAT"
+  | "MISSING_AWB_AND_ORDER_ID" | "AWB_NOT_FOUND" | "ORDER_ID_NOT_FOUND"
+  | "SHOPIFY_ORDER_NOT_FOUND" | "MULTIPLE_AWB_MATCHES" | "MULTIPLE_ORDER_ID_MATCHES"
+  | "MULTIPLE_SHOPIFY_MATCHES" | "INVALID_ORDER_IDENTIFIER" | "UNKNOWN";
 
 export interface ParsedAwbRemittanceRow {
   crf_id: string;
@@ -404,12 +410,16 @@ export interface RemittanceMatchDiagnostic {
   orderIdMatchFound: boolean;
   shopifyMatchFound: boolean;
   canonicalOrdersTotal: number;
+  matchMethod: RemittanceMatchMethod;
+  matchReasonCode: RemittanceMatchReasonCode;
+  matchCandidateCount: number;
 }
 
 export function diagnoseRemittanceMatch(
   row: Pick<ParsedAwbRemittanceRow, "awb" | "order_id">,
   index: OrderMatchIndex,
-  canonicalOrdersTotal: number
+  canonicalOrdersTotal: number,
+  match?: Pick<ReturnType<typeof matchRemittanceOrderRow>, "matchMethod" | "matchReasonCode" | "matchCandidateCount">
 ): RemittanceMatchDiagnostic {
   const awb = normalizeBusinessIdentifier(row.awb);
   const orderId = normalizeBusinessIdentifier(row.order_id);
@@ -421,6 +431,9 @@ export function diagnoseRemittanceMatch(
     orderIdMatchFound: orderId ? (index.byOrderId.get(orderId)?.length ?? 0) > 0 : false,
     shopifyMatchFound: shopify ? (index.byShopifyFormat.get(shopify)?.length ?? 0) > 0 : false,
     canonicalOrdersTotal,
+    matchMethod: match?.matchMethod ?? "NONE",
+    matchReasonCode: match?.matchReasonCode ?? "UNKNOWN",
+    matchCandidateCount: match?.matchCandidateCount ?? 0,
   };
 }
 
@@ -442,24 +455,28 @@ export function indexOrdersForRemittanceMatch(
 export function matchRemittanceOrderRow(
   row: Pick<ParsedAwbRemittanceRow, "awb" | "order_id">,
   index: OrderMatchIndex
-): { status: RemittanceMatchStatus; matchedSrOrderId: string | null } {
+): { status: RemittanceMatchStatus; matchedSrOrderId: string | null; matchMethod: RemittanceMatchMethod; matchReasonCode: RemittanceMatchReasonCode; matchCandidateCount: number } {
   const awb = normalizeBusinessIdentifier(row.awb);
   const orderId = normalizeBusinessIdentifier(row.order_id);
 
   const awbHits = awb ? index.byAwb.get(awb) ?? [] : [];
-  if (awbHits.length === 1) return { status: "matched", matchedSrOrderId: awbHits[0] };
-  if (awbHits.length > 1) return { status: "ambiguous", matchedSrOrderId: null };
+  if (awbHits.length === 1) return { status: "matched", matchedSrOrderId: awbHits[0], matchMethod: "AWB", matchReasonCode: "MATCHED_BY_AWB", matchCandidateCount: 1 };
+  if (awbHits.length > 1) return { status: "ambiguous", matchedSrOrderId: null, matchMethod: "AWB", matchReasonCode: "MULTIPLE_AWB_MATCHES", matchCandidateCount: awbHits.length };
 
   const orderHits = orderId ? index.byOrderId.get(orderId) ?? [] : [];
-  if (orderHits.length === 1) return { status: "matched", matchedSrOrderId: orderHits[0] };
-  if (orderHits.length > 1) return { status: "ambiguous", matchedSrOrderId: null };
+  if (orderHits.length === 1) return { status: "matched", matchedSrOrderId: orderHits[0], matchMethod: "ORDER_ID", matchReasonCode: "MATCHED_BY_ORDER_ID", matchCandidateCount: 1 };
+  if (orderHits.length > 1) return { status: "ambiguous", matchedSrOrderId: null, matchMethod: "ORDER_ID", matchReasonCode: "MULTIPLE_ORDER_ID_MATCHES", matchCandidateCount: orderHits.length };
 
   const shopify = extractShopifyOrderId(orderId);
   const shopifyHits = shopify ? index.byShopifyFormat.get(shopify) ?? [] : [];
-  if (shopifyHits.length === 1) return { status: "matched", matchedSrOrderId: shopifyHits[0] };
-  if (shopifyHits.length > 1) return { status: "ambiguous", matchedSrOrderId: null };
+  if (shopifyHits.length === 1) return { status: "matched", matchedSrOrderId: shopifyHits[0], matchMethod: "SHOPIFY_FORMAT", matchReasonCode: "MATCHED_BY_SHOPIFY_FORMAT", matchCandidateCount: 1 };
+  if (shopifyHits.length > 1) return { status: "ambiguous", matchedSrOrderId: null, matchMethod: "SHOPIFY_FORMAT", matchReasonCode: "MULTIPLE_SHOPIFY_MATCHES", matchCandidateCount: shopifyHits.length };
 
-  return { status: "unmatched", matchedSrOrderId: null };
+  return {
+    status: "unmatched", matchedSrOrderId: null, matchMethod: "NONE",
+    matchReasonCode: !awb && !orderId ? "MISSING_AWB_AND_ORDER_ID" : awbHits.length === 0 && awb ? "AWB_NOT_FOUND" : orderId ? "ORDER_ID_NOT_FOUND" : "SHOPIFY_ORDER_NOT_FOUND",
+    matchCandidateCount: 0,
+  };
 }
 
 export async function importRemittanceWorkbook(options: {
@@ -476,6 +493,9 @@ export async function importRemittanceWorkbook(options: {
   matchedOrders: number;
   unmatchedOrders: number;
   ambiguousOrders: number;
+  matchedByAwb: number;
+  matchedByOrderId: number;
+  matchedByShopifyFormat: number;
   canonicalOrdersTotal: number;
   sampleUnmatched: RemittanceMatchDiagnostic[];
 }> {
@@ -569,14 +589,21 @@ export async function importRemittanceWorkbook(options: {
     let unmatched = 0;
     let ambiguous = 0;
     let awbUpserted = 0;
+    let matchedByAwb = 0;
+    let matchedByOrderId = 0;
+    let matchedByShopifyFormat = 0;
+    const importAuditRows: Record<string, unknown>[] = [];
     for (const row of parsed.awbRows) {
       const match = matchRemittanceOrderRow(row, index);
       if (match.status === "matched") matched += 1;
       else if (match.status === "ambiguous") ambiguous += 1;
       else unmatched += 1;
+      if (match.matchMethod === "AWB") matchedByAwb += 1;
+      if (match.matchMethod === "ORDER_ID") matchedByOrderId += 1;
+      if (match.matchMethod === "SHOPIFY_FORMAT") matchedByShopifyFormat += 1;
 
       if (match.status === "unmatched" && sampleUnmatched.length < 5) {
-        sampleUnmatched.push(diagnoseRemittanceMatch(row, index, canonicalOrders.length));
+        sampleUnmatched.push(diagnoseRemittanceMatch(row, index, canonicalOrders.length, match));
       }
 
       const { error } = await supabase.from("shiprocket_remittance_orders").upsert(
@@ -597,12 +624,31 @@ export async function importRemittanceWorkbook(options: {
           linked_crf_ids: row.linked_crf_ids,
           matched_sr_order_id: match.matchedSrOrderId,
           match_status: match.status,
+          match_method: match.matchMethod,
+          match_reason_code: match.matchReasonCode,
+          match_candidate_count: match.matchCandidateCount,
+          last_import_id: importRow.id,
           source,
         },
         { onConflict: "crf_id,awb,order_id" }
       );
       if (error) throw new Error(error.message);
       awbUpserted += 1;
+      importAuditRows.push({
+        import_id: importRow.id, crf_id: row.crf_id || null, awb: row.awb || null, order_id: row.order_id || null,
+        match_status: match.status, match_method: match.matchMethod, match_reason_code: match.matchReasonCode,
+        match_candidate_count: match.matchCandidateCount, matched_sr_order_id: match.matchedSrOrderId,
+        delivered_date: row.delivered_date, shipped_date: row.shipped_date, courier: row.courier || null,
+        channel_name: row.channel_name || null, remittance_type: row.remittance_type || null,
+        remittance_date: row.remittance_date, order_value: row.order_value,
+        total_adjusted_amt: row.total_adjusted_amt, utr: row.utr || null,
+        linked_crf_ids: row.linked_crf_ids || null,
+      });
+    }
+
+    if (importAuditRows.length) {
+      const { error } = await supabase.from("shiprocket_remittance_import_rows").insert(importAuditRows);
+      if (error) throw new Error(error.message);
     }
 
     await supabase
@@ -614,6 +660,9 @@ export async function importRemittanceWorkbook(options: {
         matched_orders: matched,
         unmatched_orders: unmatched,
         ambiguous_orders: ambiguous,
+        matched_by_awb: matchedByAwb,
+        matched_by_order_id: matchedByOrderId,
+        matched_by_shopify_format: matchedByShopifyFormat,
         completed_at: new Date().toISOString(),
       })
       .eq("id", importRow.id);
@@ -628,6 +677,9 @@ export async function importRemittanceWorkbook(options: {
       matchedOrders: matched,
       unmatchedOrders: unmatched,
       ambiguousOrders: ambiguous,
+      matchedByAwb,
+      matchedByOrderId,
+      matchedByShopifyFormat,
       canonicalOrdersTotal: canonicalOrders.length,
       sampleUnmatched,
     };

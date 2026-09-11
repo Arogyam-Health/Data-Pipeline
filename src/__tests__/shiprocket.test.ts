@@ -30,7 +30,7 @@ import {
   normalizeBusinessIdentifier,
   parseRemittanceWorkbook,
 } from "../modules/shiprocket/remittance";
-import { classifyShiprocketStatus, computeOverviewFromRows, resolveCanonicalDeliveryState } from "../modules/shiprocket/status";
+import { classifyShiprocketStatus, computeOverviewFromRows, isReturnShipment, resolveCanonicalDeliveryState } from "../modules/shiprocket/status";
 import { reconciliationStatus } from "../modules/shiprocket/query";
 
 // ============================================================
@@ -792,45 +792,27 @@ describe("Remittance matching", () => {
   ]);
 
   it("matches exact AWB", () => {
-    expect(matchRemittanceOrderRow({ awb: "TESTAWB001", order_id: "nope" }, index)).toEqual({
-      status: "matched",
-      matchedSrOrderId: "SR-1",
-    });
+    expect(matchRemittanceOrderRow({ awb: "TESTAWB001", order_id: "nope" }, index)).toMatchObject({ status: "matched", matchedSrOrderId: "SR-1", matchMethod: "AWB", matchReasonCode: "MATCHED_BY_AWB", matchCandidateCount: 1 });
   });
 
   it("matches numeric AWB strings normalized on both sides", () => {
     const numericIndex = indexOrdersForRemittanceMatch([
       { sr_order_id: "SR-N", awb: "1904076086893", order_id: "62622018" },
     ]);
-    expect(matchRemittanceOrderRow({ awb: "1904076086893", order_id: "" }, numericIndex)).toEqual({
-      status: "matched",
-      matchedSrOrderId: "SR-N",
-    });
-    expect(matchRemittanceOrderRow({ awb: "1.904076086893E+12", order_id: "" }, numericIndex)).toEqual({
-      status: "matched",
-      matchedSrOrderId: "SR-N",
-    });
+    expect(matchRemittanceOrderRow({ awb: "1904076086893", order_id: "" }, numericIndex)).toMatchObject({ status: "matched", matchedSrOrderId: "SR-N", matchMethod: "AWB" });
+    expect(matchRemittanceOrderRow({ awb: "1.904076086893E+12", order_id: "" }, numericIndex)).toMatchObject({ status: "matched", matchedSrOrderId: "SR-N", matchMethod: "AWB" });
   });
 
   it("matches exact order id when AWB is absent", () => {
-    expect(matchRemittanceOrderRow({ awb: "", order_id: "12345678" }, index)).toEqual({
-      status: "matched",
-      matchedSrOrderId: "SR-1",
-    });
+    expect(matchRemittanceOrderRow({ awb: "", order_id: "12345678" }, index)).toMatchObject({ status: "matched", matchedSrOrderId: "SR-1", matchMethod: "ORDER_ID", matchReasonCode: "MATCHED_BY_ORDER_ID" });
   });
 
   it("does not pick an arbitrary row for an ambiguous order id", () => {
-    expect(matchRemittanceOrderRow({ awb: "", order_id: "DUP-ORDER" }, index)).toEqual({
-      status: "ambiguous",
-      matchedSrOrderId: null,
-    });
+    expect(matchRemittanceOrderRow({ awb: "", order_id: "DUP-ORDER" }, index)).toMatchObject({ status: "ambiguous", matchedSrOrderId: null, matchReasonCode: "MULTIPLE_ORDER_ID_MATCHES", matchCandidateCount: 2 });
   });
 
   it("keeps unmatched settlement rows", () => {
-    expect(matchRemittanceOrderRow({ awb: "MISSINGAWB", order_id: "MISSINGORDER" }, index)).toEqual({
-      status: "unmatched",
-      matchedSrOrderId: null,
-    });
+    expect(matchRemittanceOrderRow({ awb: "MISSINGAWB", order_id: "MISSINGORDER" }, index)).toMatchObject({ status: "unmatched", matchedSrOrderId: null, matchReasonCode: "AWB_NOT_FOUND" });
   });
 });
 
@@ -903,6 +885,7 @@ describe("KPI and table consistency", () => {
     expect(reconciliationStatus({ status_bucket: "delivered", payment_bucket: "COD", remittance_match_status: "matched" })).toBe("DELIVERED_REMITTED");
     expect(reconciliationStatus({ status_bucket: "delivered", payment_bucket: "COD", remittance_match_status: "unmatched" })).toBe("DELIVERED_NOT_REMITTED");
     expect(reconciliationStatus({ status_bucket: "delivered", payment_bucket: "Prepaid", remittance_match_status: "unmatched" })).toBe("NOT_APPLICABLE_PREPAID");
+    expect(reconciliationStatus({ status_bucket: "delivered", payment_bucket: "Prepaid", remittance_match_status: "matched" })).toBe("PREPAID_WITH_REMITTANCE");
     expect(reconciliationStatus({ status_bucket: "rto", payment_bucket: "COD", remittance_match_status: "matched" })).toBe("REMITTED_NOT_DELIVERED");
     expect(reconciliationStatus({ status_bucket: "in_transit", payment_bucket: "COD", remittance_match_status: "matched" })).toBe("REMITTED_NOT_DELIVERED");
     expect(reconciliationStatus({ status_bucket: "delivered", remittance_match_status: "matched" })).toBe("UNKNOWN_PAYMENT");
@@ -910,6 +893,13 @@ describe("KPI and table consistency", () => {
   it("classifies RTO Delivered as rto, not delivered", () => {
     expect(classifyShiprocketStatus("RTO Delivered", "RTO Delivered")).toBe("rto");
     expect(classifyShiprocketStatus("Delivered", "")).toBe("delivered");
+  });
+
+  it("separates reverse shipments from primary forward candidates", () => {
+    expect(isReturnShipment({ orderId: "R_82623796", isReturn: true })).toBe(true);
+    expect(isReturnShipment({ orderId: "82623796", isReturn: false, shipmentStatus: "DELIVERED" })).toBe(false);
+    expect(isReturnShipment({ orderId: "82623796", isReturn: false, returnAwbCode: "77123456789", currentStatus: "RTO IN TRANSIT" })).toBe(false);
+    expect(isReturnShipment({ orderId: "82623796", isReturn: false, currentStatus: "RETURN OUT FOR PICKUP" })).toBe(false);
   });
 
   it("uses the same population for table count and KPIs", () => {

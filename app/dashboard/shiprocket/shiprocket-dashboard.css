@@ -928,3 +928,14 @@
   border: 1px dashed #cbd5e1;
   background: #f8fafc;
 }
+
+.sr-import-result {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+}
+.sr-import-result > strong,
+.sr-import-result > small { display: block; }
+.sr-import-result > small { margin-top: 0.25rem; color: #475569; }

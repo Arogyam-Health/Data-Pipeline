@@ -1,6 +1,39 @@
-import { aggregateProfitability, canonicalChannel, computeJourneySummary, normalizedAttributionStatus, splitCohortFilters } from "../modules/journey/analytics";
+import { aggregateProfitability, canonicalChannel, computeJourneySummary, mergeCanonicalRemittance, normalizedAttributionStatus, splitCohortFilters } from "../modules/journey/analytics";
+import { reconcileRemittanceRows, summarizeRemittanceReconciliation } from "../modules/journey/reconciliation";
 
 describe("customer journey and profitability", () => {
+  it("accounts for every source row and resolves the known stale-delivery case", () => {
+    const rows = reconcileRemittanceRows(
+      [
+        { crf_id: "13440384", awb: "77920686373", order_id: "62623035", matched_sr_order_id: "1515536430", match_status: "matched", utr: "IN1", remittance_date: "2026-09-09" },
+        { crf_id: "13440384", awb: "NO-SHOPIFY", order_id: "62623036", match_status: "matched", utr: "IN1", remittance_date: "2026-09-09" },
+      ],
+      new Map([["1515536430", { sr_order_id: "1515536430", shipment_status: "IN TRANSIT", current_status: "IN TRANSIT", payment_bucket: "COD", shopify_matched: true, shopify_order_identifier: "gid://shopify/Order/1", scans: [{ scan_date: "2026-08-30T14:40:00", sr_status: "7", activity: "SHIPMENT DELIVERED" }] }]]),
+      new Map([["1515536430", { shopify_order_id: "gid://shopify/Order/1", order_date: "2026-08-25", payment_type: "COD" }]]),
+      new Map(),
+      { from: "2026-08-13", to: "2026-09-11" },
+    );
+    expect(rows[0].delivery).toMatchObject({ outcome: "DELIVERED", source: "SCAN_TIMELINE", statusConflict: true });
+    expect(rows[0].finalReason).toBe("DELIVERY_STATUS_CONFLICT_RESOLVED_BY_SCAN");
+    expect(rows[1].finalReason).toBe("NO_SHOPIFY_MATCH");
+    expect(rows[0].hasShopifyMatch).toBe(true);
+    expect(rows[1].hasShopifyMatch).toBe(false);
+    expect(summarizeRemittanceReconciliation(rows)).toMatchObject({ sourceRows: 2, shopifyMatched: 1, noShopifyMatch: 1, journeyRowsExist: 1, journeyRowsMissing: 0, finalDeliveredCodRemitted: 1, needsReview: 1 });
+  });
+
+  it("distinguishes a Shopify match with a missing Journey linkage", () => {
+    const [row] = reconcileRemittanceRows(
+      [{ order_id: "82623796", matched_sr_order_id: "1539538552", match_status: "matched" }],
+      new Map([["1539538552", { sr_order_id: "1539538552", shopify_matched: true, shopify_order_identifier: "8818725126430", shipment_status: "DELIVERED" }]]),
+      new Map(),
+      new Map([["8818725126430", { shopify_order_id: "8818725126430", created_at_shopify: "2026-08-25T06:11:11Z", payment_gateway_names: ["cash_on_delivery"] }]]),
+    );
+    expect(row.hasShopifyMatch).toBe(true);
+    expect(row.journey).toBeNull();
+    expect(row.finalReason).toBe("JOURNEY_ROW_MISSING");
+    expect(row.paymentType).toBe("COD");
+    expect(row.insideJourneyCohort).toBe(true);
+  });
   it.each([
     [{ channel: "META", meta_attribution_state: "EXACT_AD" }, "META"],
     [{ channel: "DIRECT", meta_attribution_state: "NO_META_MATCH" }, "DIRECT"],
@@ -124,5 +157,32 @@ describe("customer journey and profitability", () => {
     );
     expect(row.delivered_current_revenue).toBe(800);
     expect(row.delivered_current_roas).toBe(0.8);
+  });
+
+  it("applies the canonical remittance match before a REMITTED filter", () => {
+    const rows = mergeCanonicalRemittance([
+      { shopify_order_id: "O1", shiprocket_sr_order_id: "SR1", payment_type: "COD", is_delivered: true, remittance_status: "DELIVERED_NOT_REMITTED" },
+    ], [{ matched_sr_order_id: "SR1", match_status: "matched", match_method: "AWB", crf_id: "CRF1" }]);
+    expect(rows.filter((row) => row.remittance_status === "REMITTED")).toHaveLength(1);
+    expect(rows[0].has_remittance_match).toBe(true);
+    expect(rows[0].remittance_match_method).toBe("AWB");
+  });
+
+  it("keeps order value separate from the AWB adjustment", () => {
+    const [row] = mergeCanonicalRemittance(
+      [{ shopify_order_id: "O1", shiprocket_sr_order_id: "SR1", remittance_status: "DELIVERED_NOT_REMITTED" }],
+      [{ matched_sr_order_id: "SR1", match_status: "matched", order_value: 5940, total_adjusted_amt: 0 }]
+    );
+    expect(row.remitted_amount).toBe(5940);
+    expect(row.remittance_adjustment).toBe(0);
+    expect(row.remitted_amount).not.toBe(row.remittance_adjustment);
+  });
+
+  it("does not label an in-transit matched order as normally remitted", () => {
+    const [row] = mergeCanonicalRemittance(
+      [{ shopify_order_id: "O1", shiprocket_sr_order_id: "SR1", payment_type: "COD", is_delivered: false, delivery_outcome: "IN_TRANSIT" }],
+      [{ matched_sr_order_id: "SR1", match_status: "matched", order_value: 5940, total_adjusted_amt: 0 }]
+    );
+    expect(row.remittance_status).toBe("REMITTED_NOT_DELIVERED");
   });
 });

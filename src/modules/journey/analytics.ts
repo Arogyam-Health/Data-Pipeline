@@ -88,7 +88,7 @@ function applyJourneyFilters(query: Query, filters: JourneyFilter): Query {
   if (search) {
     const term = escapeSearch(search.replace(/^#/, ""));
     next = next.or(
-      `shopify_order_id.eq.${term},order_name.eq.${term},order_number.eq.${term},shiprocket_sr_order_id.eq.${term},awb.eq.${term},shipment_id.eq.${term},crf_id.eq.${term},utr.eq.${term}`
+      `shopify_order_id.eq.${term},order_name.eq.${term},order_name.eq.#${term},order_number.eq.${term},shiprocket_sr_order_id.eq.${term},awb.eq.${term},shipment_id.eq.${term},crf_id.eq.${term},utr.eq.${term}`
     );
   }
   return next;
@@ -181,6 +181,47 @@ async function fetchAllJourney(filters: JourneyFilter): Promise<JourneyRow[]> {
 
 const journeyFetchCache = new Map<string, { promise: Promise<JourneyRow[]>; expiresAt: number }>();
 
+export function mergeCanonicalRemittance(
+  rows: JourneyRow[],
+  remittances: Array<Record<string, unknown>>
+): JourneyRow[] {
+  const bySr = new Map<string, Record<string, unknown>>();
+  for (const remittance of remittances) {
+    const srId = String(remittance.matched_sr_order_id || "");
+    if (!srId) continue;
+    const previous = bySr.get(srId);
+    if (!previous || String(remittance.remittance_date || "") > String(previous.remittance_date || "")) bySr.set(srId, remittance);
+  }
+  return rows.map((row) => {
+    const match = bySr.get(String(row.shiprocket_sr_order_id || ""));
+    if (!match) return row;
+    const payment = String(row.payment_type || "").toUpperCase();
+    const gateways = Array.isArray(row.shopify_payment_gateway_names) ? row.shopify_payment_gateway_names.map(String).join(" ") : String(row.shopify_payment_gateway_names || "");
+    const isCod = payment === "COD" || String(row.is_cod || "").toLowerCase() === "true" || /cod|cash/i.test(gateways);
+    const isDelivered = Boolean(row.is_delivered) || String(row.delivery_outcome || "") === "DELIVERED";
+    const reconciliationStatus = !isCod
+      ? "REMITTANCE_FOUND_NON_COD"
+      : isDelivered ? "REMITTED" : "REMITTED_NOT_DELIVERED";
+    return {
+      ...row,
+      has_remittance_match: true,
+      remittance_match_status: "MATCHED",
+      remittance_status: reconciliationStatus,
+      remittance_match_method: match.match_method ?? row.remittance_match_method,
+      remittance_match_reason_code: match.match_reason_code ?? row.remittance_match_reason_code,
+      remittance_order_value_total: match.order_value ?? row.remittance_order_value_total,
+      latest_total_adjusted_amt: match.total_adjusted_amt ?? row.latest_total_adjusted_amt,
+      latest_remittance_date: match.remittance_date ?? row.latest_remittance_date,
+      crf_id: match.crf_id ?? row.crf_id,
+      utr: match.utr ?? row.utr,
+      latest_remitted_at: match.remittance_date ?? row.latest_remitted_at,
+      // total_adjusted_amt is an adjustment, not the amount remitted to this order.
+      remitted_amount: match.order_value ?? row.remitted_amount,
+      remittance_adjustment: match.total_adjusted_amt ?? row.remittance_adjustment,
+    };
+  });
+}
+
 async function attributionByOrder(orderIds: string[]): Promise<Map<string, Record<string, unknown>>> {
   const client = getSupabaseClient();
   const map = new Map<string, Record<string, unknown>>();
@@ -265,7 +306,8 @@ function enrichRows(rows: JourneyRow[], attribution: Map<string, Record<string, 
 
 export function computeJourneySummary(rows: JourneyRow[]) {
   const exactStates = exactMetaStates;
-  const deliveredCod = rows.filter((row) => row.is_delivered && row.payment_type === "COD");
+  const isCod = (row: JourneyRow) => row.payment_type === "COD" || row.is_cod === true || String(row.is_cod || "").toLowerCase() === "true" || /cod|cash/i.test(Array.isArray(row.shopify_payment_gateway_names) ? row.shopify_payment_gateway_names.map(String).join(" ") : String(row.shopify_payment_gateway_names || ""));
+  const deliveredCod = rows.filter((row) => row.is_delivered && isCod(row));
   const remittedCod = deliveredCod.filter((row) => row.remittance_status === "REMITTED");
   const channelBreakdown: Record<string, number> = { META: 0, DIRECT: 0, GOOGLE: 0, KWIKENGAGE: 0, OTHER: 0, UNKNOWN: 0 };
   const metaBreakdown: Record<string, number> = { EXACT_AD: 0, EXACT_ADSET: 0, EXACT_CAMPAIGN: 0, META_SOURCE_ONLY: 0, NO_META_MATCH: 0 };
@@ -516,7 +558,7 @@ export async function queryProfitability(filters: JourneyFilter, level: Profitab
 export async function getJourneyDetail(shopifyOrderId: string) {
   const client = getSupabaseClient();
   const [{ data: journey, error }, { data: attribution }, { data: commerce }] = await Promise.all([
-    client.from("mart_order_journey_ndr").select(JOURNEY_COLUMNS).eq("shopify_order_id", shopifyOrderId).maybeSingle(),
+    client.from("mart_order_journey_remittance").select(JOURNEY_COLUMNS).eq("shopify_order_id", shopifyOrderId).maybeSingle(),
     client.from("shopify_meta_attribution").select(ATTRIBUTION_COLUMNS).eq("shopify_order_id", shopifyOrderId).maybeSingle(),
     client.from("shopify_orders").select("shopify_order_id,current_total_price,total_discounts,cancelled_at,cancel_reason,source_name").eq("shopify_order_id", shopifyOrderId).maybeSingle(),
   ]);
@@ -527,7 +569,7 @@ export async function getJourneyDetail(shopifyOrderId: string) {
   const [{ data: shipment }, { data: scans }, { data: remittances }] = srOrderId ? await Promise.all([
     client.from("shiprocket_orders").select("sr_order_id,created_at_sr,order_date,awb_assigned_date,pickup_scheduled_date,delivered_date,shipment_status,current_status,current_status_id,shipment_status_id,undelivered_reason,undelivered_reason_code,delivery_attempt_count").eq("sr_order_id", srOrderId).maybeSingle(),
     client.from("shiprocket_scans").select("scan_index,scan_date,status,sr_status,sr_status_label,activity,location").eq("sr_order_id", srOrderId).order("scan_index", { ascending: true }),
-    client.from("shiprocket_remittance_orders").select("crf_id,utr,remittance_date,total_adjusted_amt,match_status").eq("matched_sr_order_id", srOrderId),
+    client.from("shiprocket_remittance_orders").select("crf_id,utr,remittance_date,order_value,total_adjusted_amt,match_status,match_method,match_reason_code").eq("matched_sr_order_id", srOrderId),
   ]) : [{ data: null }, { data: [] }, { data: [] }];
   const creatives = await creativeByAd(journeyRow.resolved_ad_id ? [String(journeyRow.resolved_ad_id)] : []);
   const [row] = enrichRows([journeyRow], new Map([[shopifyOrderId, (attribution || {}) as unknown as Record<string, unknown>]]), creatives);
@@ -540,7 +582,7 @@ export async function getJourneyDetail(shopifyOrderId: string) {
   }
   for (const remittance of remittances || []) {
     if (!remittance.remittance_date) continue;
-    events.push({ type: "REMITTANCE_RECEIVED", at: remittance.remittance_date, title: "Remittance received", crf_id: remittance.crf_id, utr: remittance.utr, amount: remittance.total_adjusted_amt });
+    events.push({ type: "REMITTANCE_RECEIVED", at: remittance.remittance_date, title: "Remittance received", crf_id: remittance.crf_id, utr: remittance.utr, amount: remittance.order_value, adjustment: remittance.total_adjusted_amt });
   }
   events.sort((a, b) => new Date(String(a.at)).valueOf() - new Date(String(b.at)).valueOf());
   return { order: { ...row, ...commerce }, attribution: attribution || null, shipment: shipment || null, remittances: remittances || [], timeline: events };

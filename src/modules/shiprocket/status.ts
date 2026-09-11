@@ -20,6 +20,19 @@ export interface DeliveryStateInput {
   scans?: Array<Record<string, unknown>>;
 }
 
+/** Shared shipment-direction rule used when choosing a primary Shopify shipment. */
+export function isReturnShipment(input: {
+  isReturn?: unknown;
+  orderId?: unknown;
+  returnAwbCode?: unknown;
+  shipmentStatus?: unknown;
+  currentStatus?: unknown;
+}): boolean {
+  return input.isReturn === true
+    || normalized(input.isReturn) === "TRUE"
+    || /^R_/i.test(String(input.orderId ?? "").trim())
+    ;
+}
 
 export interface CanonicalDeliveryState {
   outcome: CanonicalDeliveryOutcome;
@@ -122,6 +135,20 @@ export interface OverviewRowInput {
   status_bucket?: string | null;
   shipment_status?: string | null;
   current_status?: string | null;
+  shipment_status_id?: string | number | null;
+  current_status_id?: string | number | null;
+  delivered_date?: string | null;
+  awb?: string | null;
+  scans0_status?: string | null;
+  scans0_sr_status_label?: string | null;
+  scans0_sr_status?: string | number | null;
+  scans0_date?: string | null;
+  scans0_activity?: string | null;
+  scans1_status?: string | null;
+  scans1_sr_status_label?: string | null;
+  scans1_sr_status?: string | number | null;
+  scans1_date?: string | null;
+  scans1_activity?: string | null;
   payment_method?: string | null;
   payment_bucket?: string | null;
   order_total_num?: number | string | null;
@@ -168,7 +195,9 @@ export interface ShiprocketOverview {
   remittanceRowsTotal: number;
   remittanceMatched: number;
   remittanceUnmatched: number;
+  remittanceAmbiguous: number;
   remittanceMatchRate: number | null;
+  deliveredCodSettlementCoverage: number | null;
   deliveredCodOrders: number;
   deliveredRemittedOrders: number;
   deliveredNotRemittedOrders: number;
@@ -224,9 +253,17 @@ export function computeOverviewFromRows(rows: OverviewRowInput[]): ShiprocketOve
   let paymentUnknownOrders = 0;
 
   for (const row of rows) {
-    const bucket =
-      (row.status_bucket as ShiprocketStatusBucket | undefined) ||
-      classifyShiprocketStatus(row.shipment_status, row.current_status);
+  const state = resolveCanonicalDeliveryState({
+    statusBucket: row.status_bucket,
+      shipmentStatus: row.shipment_status, currentStatus: row.current_status,
+      shipmentStatusId: row.shipment_status_id, currentStatusId: row.current_status_id,
+      deliveredDate: row.delivered_date, awb: row.awb,
+      scans: [
+        { status: row.scans0_status, sr_status_label: row.scans0_sr_status_label, sr_status: row.scans0_sr_status, scan_date: row.scans0_date, activity: row.scans0_activity },
+        { status: row.scans1_status, sr_status_label: row.scans1_sr_status_label, sr_status: row.scans1_sr_status, scan_date: row.scans1_date, activity: row.scans1_activity },
+      ],
+    });
+    const bucket: ShiprocketStatusBucket = state.outcome === "DELIVERED" ? "delivered" : state.outcome === "RTO" ? "rto" : state.outcome === "NDR_OPEN" ? "ndr" : state.outcome === "IN_TRANSIT" ? "in_transit" : (row.status_bucket as ShiprocketStatusBucket | undefined) || "other";
     if (bucket === "delivered") delivered += 1;
     else if (bucket === "in_transit") inTransit += 1;
     else if (bucket === "out_for_delivery") outForDelivery += 1;
@@ -304,7 +341,9 @@ export function computeOverviewFromRows(rows: OverviewRowInput[]): ShiprocketOve
       : "NO_REMITTANCE_DATA",
     remittanceRowsTotal: matchedRemittanceRows + unmatchedRemittanceOrders,
     remittanceUnmatched: unmatchedRemittanceOrders,
+    remittanceAmbiguous: 0,
     remittanceMatchRate: matchedRemittanceRows + unmatchedRemittanceOrders > 0 ? Math.round((matchedRemittanceRows / (matchedRemittanceRows + unmatchedRemittanceOrders)) * 1000) / 10 : null,
+    deliveredCodSettlementCoverage: deliveredCodOrders > 0 ? Math.round((deliveredRemittedOrders / deliveredCodOrders) * 1000) / 10 : null,
     deliveredCodOrders,
     deliveredRemittedOrders,
     deliveredNotRemittedOrders: Math.max(0, deliveredCodOrders - deliveredRemittedOrders),

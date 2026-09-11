@@ -277,6 +277,7 @@ export const shiprocketFilterRequestSchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(500).default(25),
   includeRaw: z.boolean().optional(),
+  remittanceImportId: z.string().max(100).optional(),
 });
 
 export type ShiprocketFilterRequest = z.infer<typeof shiprocketFilterRequestSchema>;

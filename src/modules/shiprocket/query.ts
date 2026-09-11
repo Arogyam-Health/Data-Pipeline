@@ -10,6 +10,7 @@ import { buildLegacyPabblyPayload, LEGACY_PABBLY_HEADERS } from "./legacy";
 import { SHIPROCKET_EXPLORER_COLUMNS } from "./explorer-contract";
 import { computeOverviewFromRows, resolveCanonicalDeliveryState, type OverviewRowInput, type ShiprocketOverview } from "./status";
 import type { ShiprocketExplorerRow } from "./types";
+import { reconcileRemittanceRows, summarizeRemittanceReconciliation, type RemittanceSourceRow, type ReconciliationJourneyRow, type ReconciliationShipment, type ReconciliationShopifySource } from "@/modules/journey/reconciliation";
 
 const LIST_COLUMNS = SHIPROCKET_EXPLORER_COLUMNS.join(",");
 
@@ -74,10 +75,10 @@ async function canonicalizeExplorerRows(rows: Array<Record<string, unknown>>): P
 export function reconciliationStatus(row: Record<string, unknown>): string {
   const remitted = row.remittance_match_status === "matched";
   const payment = String(row.payment_bucket || "").toUpperCase();
-  if (payment === "PREPAID") return "NOT_APPLICABLE_PREPAID";
+  if (payment === "PREPAID") return remitted ? "PREPAID_WITH_REMITTANCE" : "NOT_APPLICABLE_PREPAID";
   if (!payment && !String(row.payment_method || "").trim()) return remitted ? "UNKNOWN_PAYMENT" : "PENDING";
   const cod = payment === "COD" || /cod/i.test(String(row.payment_method || ""));
-  if (!cod) return remitted ? "UNKNOWN_PAYMENT" : "NOT_APPLICABLE_PREPAID";
+  if (!cod) return remitted ? "PREPAID_WITH_REMITTANCE" : "NOT_APPLICABLE_PREPAID";
   if (canonicalDelivered(row)) return remitted ? "DELIVERED_REMITTED" : "DELIVERED_NOT_REMITTED";
   return remitted ? "REMITTED_NOT_DELIVERED" : "PENDING";
 }
@@ -87,6 +88,20 @@ const OVERVIEW_COLUMNS = [
   "status_bucket",
   "shipment_status",
   "current_status",
+  "shipment_status_id",
+  "current_status_id",
+  "delivered_date",
+  "awb",
+  "scans0_status",
+  "scans0_sr_status_label",
+  "scans0_sr_status",
+  "scans0_date",
+  "scans0_activity",
+  "scans1_status",
+  "scans1_sr_status_label",
+  "scans1_sr_status",
+  "scans1_date",
+  "scans1_activity",
   "payment_method",
   "payment_bucket",
   "order_total_num",
@@ -130,7 +145,8 @@ async function scopedRemittanceStats(request: ShiprocketFilterRequest, srOrderId
   const supabase = getSupabaseClient();
   const rows = await loadScopedRemittanceRows(request, srOrderIds);
   const matched = rows.filter((row) => row.match_status === "matched").length;
-  const unmatched = rows.filter((row) => row.match_status !== "matched").length;
+  const unmatched = rows.filter((row) => row.match_status === "unmatched").length;
+  const ambiguous = rows.filter((row) => row.match_status === "ambiguous").length;
   const crfs = new Set(rows.map((row) => row.crf_id).filter(Boolean));
   const utrs = new Set(rows.map((row) => row.utr).filter(Boolean));
   let settlementValue = rows.filter((row) => row.match_status === "matched").reduce((sum, row) => sum + Number(row.total_adjusted_amt || 0), 0);
@@ -145,8 +161,9 @@ async function scopedRemittanceStats(request: ShiprocketFilterRequest, srOrderId
   }
   return {
     available: rows.length > 0,
-    status: rows.length === 0 ? "NO_REMITTANCE_DATA" : matched > 0 && unmatched > 0 ? "PARTIAL_REMITTANCE_DATA" : "RECONCILIATION_AVAILABLE",
+    status: rows.length === 0 ? "NO_REMITTANCE_DATA" : matched > 0 && (unmatched > 0 || ambiguous > 0) ? "PARTIAL_REMITTANCE_DATA" : "RECONCILIATION_AVAILABLE",
     rowsTotal: rows.length, matched, unmatched,
+    ambiguous,
     matchRate: rows.length ? Math.round((matched / rows.length) * 1000) / 10 : null,
     crfCount: crfs.size, utrCount: utrs.size,
     settlementValue,
@@ -356,12 +373,51 @@ export async function queryShiprocketOrders(request: ShiprocketFilterRequest): P
     throw new Error(`Shiprocket query failed: ${error.message}`);
   }
 
+  const canonicalRows = await canonicalizeExplorerRows((data as unknown as Array<Record<string, unknown>> || []));
   return {
-    rows: (data as unknown as Array<Record<string, unknown>> || []).map((row) => ({ ...row, reconciliation_status: reconciliationStatus(row) })) as unknown as ShiprocketExplorerRow[],
+    rows: canonicalRows.map((canonical) => {
+      return { ...canonical, reconciliation_status: reconciliationStatus(canonical) };
+    }) as unknown as ShiprocketExplorerRow[],
     total: count ?? 0,
     page: request.page,
     pageSize: request.pageSize,
   };
+}
+
+export async function queryRemittanceJourneyReconciliation(importId: string, cohort?: { from?: string; to?: string }) {
+  const supabase = getSupabaseClient();
+  const { data: source, error: sourceError } = await supabase.from("shiprocket_remittance_import_rows")
+    .select("crf_id,awb,order_id,matched_sr_order_id,match_status,match_method,match_reason_code,remittance_date,utr,order_value,total_adjusted_amt")
+    .eq("import_id", importId).order("id", { ascending: true }).limit(20000);
+  if (sourceError) throw new Error(`Journey remittance reconciliation source query failed: ${sourceError.message}`);
+  const sourceRows = (source || []) as RemittanceSourceRow[];
+  const srIds = [...new Set(sourceRows.map((row) => String(row.matched_sr_order_id || "")).filter(Boolean))];
+  const shipments = new Map<string, ReconciliationShipment>();
+  const journeys = new Map<string, ReconciliationJourneyRow>();
+  const shopify = new Map<string, ReconciliationShopifySource>();
+  for (let offset = 0; offset < srIds.length; offset += 500) {
+    const ids = srIds.slice(offset, offset + 500);
+    const [{ data: shipmentRows, error: shipmentError }, { data: journeyRows, error: journeyError }] = await Promise.all([
+      supabase.from("shiprocket_order_explorer").select("sr_order_id,shipment_status,current_status,shipment_status_id,current_status_id,delivered_date,status_bucket,awb,payment_bucket,payment_method,shopify_order_identifier,order_id_shopify_format,shopify_matched").in("sr_order_id", ids),
+      supabase.from("mart_order_journey_remittance").select("shiprocket_sr_order_id,shopify_order_id,created_at_shopify,order_date,payment_type,is_cod,is_delivered,delivery_outcome,remittance_status").in("shiprocket_sr_order_id", ids),
+    ]);
+    if (shipmentError) throw new Error(`Journey remittance shipment query failed: ${shipmentError.message}`);
+    if (journeyError) throw new Error(`Journey remittance order query failed: ${journeyError.message}`);
+    const scans = await supabase.from("shiprocket_scans").select("sr_order_id,scan_date,status,sr_status,sr_status_label,activity").in("sr_order_id", ids);
+    if (scans.error) throw new Error(`Journey remittance scan query failed: ${scans.error.message}`);
+    for (const row of shipmentRows || []) {
+      shipments.set(String(row.sr_order_id), { ...row, scans: (scans.data || []).filter((scan) => String(scan.sr_order_id) === String(row.sr_order_id)) as Record<string, unknown>[] });
+    }
+    for (const row of journeyRows || []) journeys.set(String(row.shiprocket_sr_order_id), row as ReconciliationJourneyRow);
+  }
+  const shopifyIds = [...new Set([...shipments.values()].map((row) => String(row.shopify_order_identifier || "")).filter(Boolean))];
+  if (shopifyIds.length) {
+    const { data, error } = await supabase.from("shopify_orders").select("shopify_order_id,order_number,order_name,created_at_shopify,payment_gateway_names").in("shopify_order_id", shopifyIds).limit(20000);
+    if (error) throw new Error(`Journey remittance Shopify query failed: ${error.message}`);
+    for (const row of data || []) shopify.set(String(row.shopify_order_id), row as ReconciliationShopifySource);
+  }
+  const rows = reconcileRemittanceRows(sourceRows, shipments, journeys, shopify, cohort);
+  return { importId, crfId: String(sourceRows.find((row) => row.crf_id)?.crf_id || ""), summary: summarizeRemittanceReconciliation(rows), rows };
 }
 
 export async function getShiprocketOrderDetail(srOrderId: string): Promise<{
@@ -381,7 +437,7 @@ export async function getShiprocketOrderDetail(srOrderId: string): Promise<{
       .order("scan_index", { ascending: true }),
     supabase
       .from("shiprocket_remittance_orders")
-      .select("crf_id, awb, order_id, remittance_type, remittance_date, utr, order_value, total_adjusted_amt, channel_name, linked_crf_ids, match_status")
+      .select("crf_id, awb, order_id, remittance_type, remittance_date, utr, order_value, total_adjusted_amt, channel_name, linked_crf_ids, match_status, match_method, match_reason_code, match_candidate_count")
       .eq("matched_sr_order_id", srOrderId),
   ]);
 
@@ -392,8 +448,9 @@ export async function getShiprocketOrderDetail(srOrderId: string): Promise<{
     : { data: [] };
   const crfMap = new Map((crfs || []).map((row) => [row.crf_id, row]));
 
+  const canonicalOrder = canonicalizeExplorerRow(order as unknown as Record<string, unknown>, (scans || []) as Record<string, unknown>[]);
   return {
-    order: order as unknown as ShiprocketExplorerRow,
+    order: canonicalOrder as unknown as ShiprocketExplorerRow,
     rawPayload: raw?.raw_payload ?? null,
     scans: scans || [],
     remittances: (remittances || []).map((row) => ({
@@ -435,11 +492,12 @@ export async function queryShiprocketOverview(
     }
   }
   const enrichedRows = allRows.map((row) => ({ ...row, ...(shopify.get(String(row.shopify_order_identifier || "")) ? { shopify_current_total_price: shopify.get(String(row.shopify_order_identifier))?.current_total_price, shopify_payment_category: shopify.get(String(row.shopify_order_identifier))?.payment_category } : {}) }));
-  const overview = computeOverviewFromRows(enrichedRows as OverviewRowInput[]);
+  const canonicalEnrichedRows = await canonicalizeExplorerRows(enrichedRows as unknown as Record<string, unknown>[]);
+  const overview = computeOverviewFromRows(canonicalEnrichedRows as OverviewRowInput[]);
   const remittance = await scopedRemittanceStats(request, allRows.map((row) => String(row.sr_order_id)).filter(Boolean));
   const isDelivered = (row: OverviewRowInput) => canonicalDelivered(row as Record<string, unknown>);
   const isCod = (row: OverviewRowInput) => row.shopify_payment_category ? row.shopify_payment_category === "COD" : row.payment_bucket === "COD" || /cod/i.test(String(row.payment_method || ""));
-  const deliveredRows = enrichedRows.filter((row) => isDelivered(row));
+  const deliveredRows = canonicalEnrichedRows.filter((row) => isDelivered(row));
   const deliveredCodRows = deliveredRows.filter((row) => isCod(row));
   // Remittance evidence is independent of payment classification. Unknown
   // payment must not erase a valid delivered/remitted match.
@@ -452,6 +510,7 @@ export async function queryShiprocketOverview(
     remittanceStatus: remittance.status as typeof overview.remittanceStatus,
     remittanceRowsTotal: remittance.rowsTotal,
     remittanceUnmatched: remittance.unmatched,
+    remittanceAmbiguous: remittance.ambiguous,
     remittanceMatchRate: remittance.matchRate,
     settledOrders: deliveredRemitted,
     unmatchedRemittanceOrders: remittance.unmatched,
@@ -463,6 +522,7 @@ export async function queryShiprocketOverview(
     deliveredCodOrders: deliveredCodRows.length,
     deliveredRemittedOrders: deliveredCodRemitted,
     deliveredNotRemittedOrders: Math.max(0, deliveredCodRows.length - deliveredCodRemitted),
+    deliveredCodSettlementCoverage: deliveredCodRows.length ? Math.round((deliveredCodRemitted / deliveredCodRows.length) * 1000) / 10 : null,
     remittedNotDeliveredOrders: remittedNotDelivered,
     deliveredOrdersWithRemittance: deliveredRemitted,
     deliveredOrdersWithoutRemittance: Math.max(0, deliveredRows.length - deliveredRemitted),
@@ -473,19 +533,44 @@ export async function queryShiprocketOverview(
 
 export async function queryShiprocketRemittances(request: ShiprocketFilterRequest = { filters: [], search: "", page: 1, pageSize: 1, sort: [] }): Promise<{
   summary: Record<string, unknown> | null;
+  importSummary: Record<string, unknown> | null;
   crfs: Record<string, unknown>[];
   imports: Record<string, unknown>[];
+  rows: Record<string, unknown>[];
+  exceptions: Record<string, unknown>[];
+  operationalScope: { rows: number; outsideScope: number };
+  scope: { type: "IMPORT" | "ALL_IMPORTS"; importId?: string; fileName?: string };
 }> {
   const supabase = getSupabaseClient();
-  const [selectedIds, imports] = await Promise.all([
+  const [selectedIds, importsResult] = await Promise.all([
     filteredShiprocketIds(request),
     supabase
       .from("shiprocket_remittance_imports")
-      .select("id, file_name, file_hash, source, awb_rows_read, awb_rows_upserted, crf_rows_read, crf_rows_upserted, matched_orders, unmatched_orders, ambiguous_orders, status, started_at, completed_at")
+      .select("id, file_name, file_hash, source, awb_rows_read, awb_rows_upserted, crf_rows_read, crf_rows_upserted, matched_orders, unmatched_orders, ambiguous_orders, matched_by_awb, matched_by_order_id, matched_by_shopify_format, status, started_at, completed_at, error_message")
       .order("created_at", { ascending: false })
-      .limit(10),
+      .limit(100),
   ]);
-  const scopedRows = await loadScopedRemittanceRows(request, selectedIds);
+  if (importsResult.error) throw new Error(`Remittance imports query failed: ${importsResult.error.message}`);
+  const imports = importsResult.data || [];
+  const selectedImport = request.remittanceImportId && request.remittanceImportId !== "ALL"
+    ? imports.find((row) => String(row.id) === request.remittanceImportId)
+    : !request.remittanceImportId ? imports.find((row) => row.status === "completed") : null;
+  if (request.remittanceImportId && request.remittanceImportId !== "ALL" && !selectedImport) {
+    throw new Error("Selected remittance import was not found");
+  }
+  let scopedRows: Record<string, unknown>[];
+  let scope: { type: "IMPORT" | "ALL_IMPORTS"; importId?: string; fileName?: string };
+  if (selectedImport) {
+    const { data, error } = await supabase.from("shiprocket_remittance_import_rows")
+      .select("id,import_id,crf_id,awb,order_id,match_status,match_method,match_reason_code,match_candidate_count,matched_sr_order_id,delivered_date,remittance_date,courier,order_value,channel_name,remittance_type,utr,total_adjusted_amt,linked_crf_ids")
+      .eq("import_id", selectedImport.id).order("id", { ascending: true }).limit(20000);
+    if (error) throw new Error(`Import remittance rows query failed: ${error.message}`);
+    scopedRows = (data || []) as Record<string, unknown>[];
+    scope = { type: "IMPORT", importId: String(selectedImport.id), fileName: String(selectedImport.file_name || "") };
+  } else {
+    scopedRows = await loadScopedRemittanceRows(request, selectedIds);
+    scope = { type: "ALL_IMPORTS" };
+  }
   const crfIds = [...new Set(scopedRows.map((row) => row.crf_id).filter(Boolean))];
   const awbAmountByCrf = new Map<string, number>();
   for (const row of scopedRows) {
@@ -498,25 +583,50 @@ export async function queryShiprocketRemittances(request: ShiprocketFilterReques
   ]);
   if (summaryError) throw new Error(`Remittance CRF query failed: ${summaryError.message}`);
   const crfRows = scopedRows;
+  const crfAwbDates = new Map<string, Set<string>>();
+  for (const row of crfRows) {
+    const date = String(row.remittance_date || "").slice(0, 10);
+    if (date) crfAwbDates.set(String(row.crf_id), new Set([...(crfAwbDates.get(String(row.crf_id)) || []), date]));
+  }
 
-  const deliveryBySr = new Map<string, boolean>();
+  const deliveryBySr = new Map<string, Record<string, unknown>>();
   const matchedSrIds = [...new Set(scopedRows.filter((row) => row.matched_sr_order_id).map((row) => String(row.matched_sr_order_id)))];
   for (let offset = 0; offset < matchedSrIds.length; offset += 500) {
     const ids = matchedSrIds.slice(offset, offset + 500);
-    const { data, error } = await supabase.from("shiprocket_order_explorer").select("sr_order_id,status_bucket,shipment_status,current_status").in("sr_order_id", ids);
+    const { data, error } = await supabase.from("shiprocket_order_explorer").select("sr_order_id,status_bucket,shipment_status,current_status,shipment_status_id,current_status_id,delivered_date,awb_assigned_date,order_date,payment_bucket,awb,scans0_status,scans0_sr_status_label,scans0_sr_status,scans0_date,scans0_activity,scans1_status,scans1_sr_status_label,scans1_sr_status,scans1_date,scans1_activity").in("sr_order_id", ids);
     if (error) throw new Error(`Remittance delivery reconciliation failed: ${error.message}`);
-    for (const row of data || []) deliveryBySr.set(String(row.sr_order_id), row.status_bucket === "delivered" || (/delivered/i.test(`${row.shipment_status || ""} ${row.current_status || ""}`) && !/rto/i.test(`${row.shipment_status || ""} ${row.current_status || ""}`)));
+    const canonicalRows = await canonicalizeExplorerRows((data || []) as Record<string, unknown>[]);
+    for (const row of canonicalRows) deliveryBySr.set(String(row.sr_order_id), row);
   }
   const crfStats = new Map<string, { awb_count: number; matched: number; unmatched: number; ambiguous: number; delivered: number; not_delivered: number }>();
   for (const row of crfRows || []) {
-    const current = crfStats.get(row.crf_id) ?? { awb_count: 0, matched: 0, unmatched: 0, ambiguous: 0, delivered: 0, not_delivered: 0 };
+    const crfId = String(row.crf_id || "");
+    const current = crfStats.get(crfId) ?? { awb_count: 0, matched: 0, unmatched: 0, ambiguous: 0, delivered: 0, not_delivered: 0 };
     current.awb_count += 1;
     if (row.match_status === "matched") current.matched += 1;
     else if (row.match_status === "ambiguous") current.ambiguous += 1;
     else current.unmatched += 1;
-    if (row.match_status === "matched") deliveryBySr.get(String(row.matched_sr_order_id)) ? current.delivered += 1 : current.not_delivered += 1;
-    crfStats.set(row.crf_id, current);
+    const shipment = deliveryBySr.get(String(row.matched_sr_order_id));
+    if (row.match_status === "matched") shipment?.status_bucket === "delivered" ? current.delivered += 1 : current.not_delivered += 1;
+    crfStats.set(crfId, current);
   }
+  const matchedRows = scopedRows.filter((row) => row.match_status === "matched");
+  const matchedDelivered = matchedRows.filter((row) => deliveryBySr.get(String(row.matched_sr_order_id))?.status_bucket === "delivered").length;
+  const matchedDeliveredCod = matchedRows.filter((row) => deliveryBySr.get(String(row.matched_sr_order_id))?.status_bucket === "delivered" && String(deliveryBySr.get(String(row.matched_sr_order_id))?.payment_bucket || "").toUpperCase() === "COD").length;
+  const matchedDeliveredNonCod = matchedRows.filter((row) => deliveryBySr.get(String(row.matched_sr_order_id))?.status_bucket === "delivered" && String(deliveryBySr.get(String(row.matched_sr_order_id))?.payment_bucket || "").toUpperCase() === "PREPAID").length;
+  const importSummary = selectedImport ? {
+    imported_rows: scopedRows.length,
+    matched: matchedRows.length,
+    unmatched: scopedRows.filter((row) => row.match_status === "unmatched").length,
+    ambiguous: scopedRows.filter((row) => row.match_status === "ambiguous").length,
+    match_rate: scopedRows.length ? Math.round((matchedRows.length / scopedRows.length) * 1000) / 10 : null,
+    matched_delivered: matchedDelivered,
+    matched_not_delivered: matchedRows.length - matchedDelivered,
+    matched_delivered_cod: matchedDeliveredCod,
+    matched_delivered_non_cod: matchedDeliveredNonCod,
+    matched_delivered_unknown: matchedDelivered - matchedDeliveredCod - matchedDeliveredNonCod,
+    outside_scope: matchedRows.filter((row) => !selectedIds.includes(String(row.matched_sr_order_id || ""))).length,
+  } : null;
 
   return {
     summary: {
@@ -528,12 +638,26 @@ export async function queryShiprocketRemittances(request: ShiprocketFilterReques
       ),
       latest_remittance_date: summaryRows?.[0]?.remittance_date ?? null,
     },
+    importSummary,
     crfs: (summaryRows || []).map((row) => ({
       ...row,
+      remittance_date: row.remittance_date || (() => {
+        const dates = [...(crfAwbDates.get(String(row.crf_id)) || new Set<string>())];
+        return dates.length === 1 ? dates[0] : dates.length > 1 ? "Multiple dates" : null;
+      })(),
       settlement_amount: row.remittance_amount != null && row.remittance_amount !== "" ? row.remittance_amount : (awbAmountByCrf.has(String(row.crf_id)) ? awbAmountByCrf.get(String(row.crf_id)) : null),
       ...(crfStats.get(row.crf_id) ?? { awb_count: 0, matched: 0, unmatched: 0, ambiguous: 0, delivered: 0, not_delivered: 0 }),
     })),
-    imports: imports.data || [],
+    imports,
+    rows: scopedRows,
+    exceptions: scopedRows.filter((row) => row.match_status !== "matched" || !selectedIds.includes(String(row.matched_sr_order_id || "")) || deliveryBySr.get(String(row.matched_sr_order_id))?.status_bucket !== "delivered").map((row) => {
+      const shipment = deliveryBySr.get(String(row.matched_sr_order_id || ""));
+      const outsideScope = row.match_status === "matched" && !selectedIds.includes(String(row.matched_sr_order_id || ""));
+      const notDelivered = row.match_status === "matched" && shipment && shipment.status_bucket !== "delivered";
+      return { ...row, ...shipment, outside_operational_scope: outsideScope, exception_reason: outsideScope ? "OUTSIDE_OPERATIONAL_SCOPE" : row.match_status === "unmatched" ? row.match_reason_code : row.match_status === "ambiguous" ? row.match_reason_code : notDelivered ? String(shipment?.status_bucket || "MISSING_DELIVERY_STATUS").toUpperCase() : "OTHER" };
+    }),
+    operationalScope: { rows: scopedRows.filter((row) => row.match_status === "matched" && selectedIds.includes(String(row.matched_sr_order_id || ""))).length, outsideScope: scopedRows.filter((row) => row.match_status === "matched" && !selectedIds.includes(String(row.matched_sr_order_id || ""))).length },
+    scope,
   };
 }
 
@@ -635,7 +759,7 @@ async function loadRemittanceQuality(request: ShiprocketFilterRequest): Promise<
   ]);
   const list = await loadScopedRemittanceRows(request, selectedIds);
   const matchedCount = list.filter((row) => row.match_status === "matched").length;
-  const unmatchedCount = list.filter((row) => row.match_status !== "matched").length;
+  const unmatchedCount = list.filter((row) => row.match_status === "unmatched").length;
   const ambiguousCount = list.filter((row) => row.match_status === "ambiguous").length;
   const crfCount = new Set(list.map((row) => row.crf_id).filter(Boolean)).size;
   const utrCount = new Set(list.map((row) => row.utr).filter(Boolean)).size;
