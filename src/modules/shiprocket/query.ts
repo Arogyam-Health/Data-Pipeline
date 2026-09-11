@@ -564,8 +564,9 @@ export async function queryShiprocketRemittances(request: ShiprocketFilterReques
   scope: { type: "IMPORT" | "ALL_IMPORTS"; importId?: string; fileName?: string };
 }> {
   const supabase = getSupabaseClient();
+  const metadataOnly = request.remittanceImportId === "IMPORTS_ONLY";
   const [selectedIds, importsResult] = await Promise.all([
-    filteredShiprocketIds(request),
+    metadataOnly ? Promise.resolve([] as string[]) : filteredShiprocketIds(request),
     supabase
       .from("shiprocket_remittance_imports")
       .select("id, file_name, file_hash, source, awb_rows_read, awb_rows_upserted, crf_rows_read, crf_rows_upserted, matched_orders, unmatched_orders, ambiguous_orders, matched_by_awb, matched_by_order_id, matched_by_shopify_format, status, started_at, completed_at, error_message")
@@ -573,11 +574,39 @@ export async function queryShiprocketRemittances(request: ShiprocketFilterReques
       .limit(100),
   ]);
   if (importsResult.error) throw new Error(`Remittance imports query failed: ${importsResult.error.message}`);
-  const imports = importsResult.data || [];
+  const rawImports = importsResult.data || [];
+  const importIds = rawImports.map((row) => String(row.id));
+  const { data: importMetadata, error: importMetadataError } = importIds.length
+    ? await supabase.from("shiprocket_remittance_import_rows")
+      .select("import_id,crf_id,remittance_date")
+      .in("import_id", importIds)
+      .limit(50000)
+    : { data: [], error: null };
+  if (importMetadataError) throw new Error(`Remittance import metadata query failed: ${importMetadataError.message}`);
+  const metadataByImport = new Map<string, { rows: number; crfs: Set<string>; dates: Set<string> }>();
+  for (const row of importMetadata || []) {
+    const importId = String(row.import_id || "");
+    if (!importId) continue;
+    const metadata = metadataByImport.get(importId) || { rows: 0, crfs: new Set<string>(), dates: new Set<string>() };
+    metadata.rows += 1;
+    if (row.crf_id) metadata.crfs.add(String(row.crf_id));
+    if (row.remittance_date) metadata.dates.add(String(row.remittance_date).slice(0, 10));
+    metadataByImport.set(importId, metadata);
+  }
+  const imports = rawImports.map((row) => {
+    const metadata = metadataByImport.get(String(row.id));
+    const dates = metadata ? [...metadata.dates].sort() : [];
+    return {
+      ...row,
+      source_rows: metadata?.rows ?? Number(row.awb_rows_read || 0),
+      crf_ids: metadata ? [...metadata.crfs].sort() : [],
+      remittance_date: dates.length === 1 ? dates[0] : dates.length > 1 ? "Multiple dates" : null,
+    };
+  });
   const selectedImport = request.remittanceImportId && request.remittanceImportId !== "ALL"
-    ? imports.find((row) => String(row.id) === request.remittanceImportId)
+    ? (metadataOnly ? null : imports.find((row) => String(row.id) === request.remittanceImportId))
     : !request.remittanceImportId ? imports.find((row) => row.status === "completed") : null;
-  if (request.remittanceImportId && request.remittanceImportId !== "ALL" && !selectedImport) {
+  if (request.remittanceImportId && !metadataOnly && request.remittanceImportId !== "ALL" && !selectedImport) {
     throw new Error("Selected remittance import was not found");
   }
   let scopedRows: Record<string, unknown>[];
@@ -589,6 +618,9 @@ export async function queryShiprocketRemittances(request: ShiprocketFilterReques
     if (error) throw new Error(`Import remittance rows query failed: ${error.message}`);
     scopedRows = (data || []) as Record<string, unknown>[];
     scope = { type: "IMPORT", importId: String(selectedImport.id), fileName: String(selectedImport.file_name || "") };
+  } else if (metadataOnly) {
+    scopedRows = [];
+    scope = { type: "ALL_IMPORTS" };
   } else {
     scopedRows = await loadScopedRemittanceRows(request, selectedIds);
     scope = { type: "ALL_IMPORTS" };

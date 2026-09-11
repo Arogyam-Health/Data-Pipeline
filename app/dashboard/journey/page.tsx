@@ -14,7 +14,35 @@ type Summary = {
   channelBreakdown: Record<string, number>; metaBreakdown: Record<string, number>;
 };
 type Detail = { order: Row; attribution: Record<string, unknown> | null; shipment: Record<string, unknown> | null; remittances: Record<string, unknown>[]; timeline: Record<string, unknown>[] };
-type RemittanceReconciliation = { importId: string; crfId?: string; summary: Record<string, number>; rows: Array<Record<string, unknown>> };
+type RemittanceImport = Record<string, unknown> & { id: string; status?: string; remittance_date?: string | null; crf_ids?: string[]; source_rows?: number };
+type RemittanceReconciliation = { importId: string; crfId?: string; summary: Record<string, unknown>; rows: Array<Record<string, unknown>> };
+
+function combineRemittanceReconciliations(items: RemittanceReconciliation[]): RemittanceReconciliation | null {
+  if (!items.length) return null;
+  const summary: Record<string, unknown> = {};
+  for (const item of items) for (const [key, value] of Object.entries(item.summary)) {
+    if (key === "reasons") continue;
+    summary[key] = Number(summary[key] || 0) + Number(value || 0);
+  }
+  const reasons: Record<string, number> = {};
+  for (const item of items) for (const [key, value] of Object.entries((item.summary.reasons as unknown as Record<string, number>) || {})) reasons[key] = (reasons[key] || 0) + Number(value || 0);
+  summary.reasons = reasons;
+  const rows = items.flatMap((item) => item.rows);
+  const uniqueJourneyOrders = new Set<string>();
+  const uniqueVisibleOrders = new Set<string>();
+  for (const row of rows) {
+    const journey = row.journey as Record<string, unknown> | null;
+    const shopifyId = String(journey?.shopify_order_id || "");
+    if (!shopifyId) continue;
+    uniqueJourneyOrders.add(shopifyId);
+    if (row.insideJourneyCohort) uniqueVisibleOrders.add(shopifyId);
+  }
+  summary.journeyRowsExist = uniqueJourneyOrders.size;
+  summary.insideJourneyCohort = uniqueVisibleOrders.size;
+  summary.journeyRowsMissing = rows.filter((row) => !row.journey && row.hasShopifyMatch).length;
+  summary.finalDeliveredCodRemitted = new Set(rows.filter((row) => row.includedInJourney).map((row) => String((row.journey as Record<string, unknown> | null)?.shopify_order_id || "")).filter(Boolean)).size;
+  return { importId: "ALL_IN_PERIOD", crfId: "All remittances in selected period", summary, rows };
+}
 
 const today = new Date().toISOString().slice(0, 10);
 const daysAgo = (days: number) => new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
@@ -49,6 +77,16 @@ function metaDisplay(row: Row, value: unknown) {
     : text(value);
 }
 
+function RemittanceReconciliationPanel({
+  imports, selectedId, reconciliation, onSelect,
+}: { imports: RemittanceImport[]; selectedId: string; reconciliation: RemittanceReconciliation | null; onSelect: (id: string) => void }) {
+  const exceptions = reconciliation?.rows.filter((row) => !row.includedInJourney) || [];
+  return <section className="journey-scope-note journey-remittance-reconciliation">
+    <div className="panel-heading"><div><h2>Remittance reconciliation</h2><p>{reconciliation ? `Selected ${text(reconciliation.crfId)} · source-file rows remain separate from the one-row-per-Shopify Journey cohort.` : "No remittance sheet in selected period."}</p></div>{imports.length > 0 && <label>Remittance sheet<select value={selectedId} onChange={(event) => onSelect(event.target.value)}>{imports.length > 1 && <option value="ALL">All remittances in selected period</option>}{imports.map((item) => <option key={item.id} value={item.id}>{text(item.crf_ids?.join(", "), "CRF unavailable")} · {date(item.remittance_date)} · {number(item.source_rows)} rows</option>)}</select></label>}</div>
+    {reconciliation ? <><div className="journey-reconciliation-grid">{([['Source remittance rows', reconciliation.summary.sourceRows], ['Shiprocket matched', reconciliation.summary.shiprocketMatched], ['Shopify matched source rows', reconciliation.summary.shopifyMatched], ['Unique Journey rows present', reconciliation.summary.journeyRowsExist], ['Unique visible Journey rows', reconciliation.summary.insideJourneyCohort], ['Excluded source rows', reconciliation.summary.needsReview]] as Array<[string, unknown]>).map(([label, value]) => <div key={label}><span>{label}</span><strong>{number(value)}</strong></div>)}</div><p className="journey-scope-note">{number(reconciliation.summary.sourceRows)} source rows · {number(reconciliation.summary.journeyRowsExist)} unique Journey rows present · {number(reconciliation.summary.insideJourneyCohort)} unique Journey rows visible in the current range · {number(reconciliation.summary.needsReview)} excluded source rows.</p><details><summary>View discrepancies ({number(reconciliation.summary.needsReview)})</summary><div className="table-scroll"><table className="orders-table"><thead><tr><th>Order</th><th>AWB</th><th>SR Order</th><th>Shopify Order</th><th>Shopify Date</th><th>Delivery</th><th>Remittance</th><th>Reason</th></tr></thead><tbody>{exceptions.map((row, index) => { const source = row.source as Record<string, unknown>; const journey = row.journey as Record<string, unknown> | null; const shopify = row.shopify as Record<string, unknown> | null; const delivery = row.delivery as Record<string, unknown> | null; const reason = String(row.finalReason || "OTHER"); return <tr key={index}><td>{text(source.order_id)}</td><td>{text(source.awb)}</td><td>{text(source.matched_sr_order_id)}</td><td>{text(shopify?.shopify_order_id, "NONE")}</td><td>{text(shopify?.created_at_shopify || journey?.order_date, "NONE")}</td><td>{text(delivery?.outcome)}</td><td>{text(journey?.remittance_status || source.match_status)}</td><td>{badge(reason)}</td></tr>; })}</tbody></table></div></details></> : <p>No remittance sheet in selected period</p>}
+  </section>;
+}
+
 export default function JourneyDashboard() {
   const [filters, setFilters] = useState<Record<string, string>>({ from: daysAgo(89), to: today });
   const [draftSearch, setDraftSearch] = useState("");
@@ -68,6 +106,8 @@ export default function JourneyDashboard() {
   const [error, setError] = useState("");
   const [operationalLookup, setOperationalLookup] = useState<Record<string, unknown>[]>([]);
   const [remittanceReconciliation, setRemittanceReconciliation] = useState<RemittanceReconciliation | null>(null);
+  const [remittanceImports, setRemittanceImports] = useState<RemittanceImport[]>([]);
+  const [selectedRemittanceImportId, setSelectedRemittanceImportId] = useState("");
 
   const params = useMemo(() => {
     const p = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
@@ -87,7 +127,7 @@ export default function JourneyDashboard() {
         fetch(`/api/journey/orders?${params}`),
         fetch(`/api/journey/profitability?${profitParams}`),
         fetch("/api/journey/freshness"),
-        fetch("/api/shiprocket/remittances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ filters: [], search: "", page: 1, pageSize: 1, sort: [], remittanceImportId: "ALL" }) }),
+        fetch("/api/shiprocket/remittances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ filters: [], search: "", page: 1, pageSize: 1, sort: [], remittanceImportId: "IMPORTS_ONLY" }) }),
       ]);
       const [orders, profit, fresh, remittances] = await Promise.all([ordersResponse.json(), profitResponse.json(), freshnessResponse.json(), remittanceResponse.json()]);
       if (!ordersResponse.ok) throw new Error(orders.error || "Order journey request failed");
@@ -96,15 +136,31 @@ export default function JourneyDashboard() {
       setProfitRows(profit.rows || []); setProfitTotals(profit.totals || {}); setProfitScope({ cohort: profit.cohort, meta_reporting: profit.meta_reporting });
       if (freshnessResponse.ok) setFreshness(fresh);
       if (remittanceResponse.ok) {
-        const selected = (remittances.imports || []).find((item: Record<string, unknown>) => item.status === "completed");
-        if (selected?.id) {
-          const bridge = await fetch(`/api/journey/remittance-reconciliation?importId=${encodeURIComponent(String(selected.id))}&from=${encodeURIComponent(filters.from || "")}&to=${encodeURIComponent(filters.to || "")}`);
-          if (bridge.ok) setRemittanceReconciliation(await bridge.json());
+        const completed = (remittances.imports || []).filter((item: RemittanceImport) => item.status === "completed");
+        const inRange = completed.filter((item: RemittanceImport) => {
+          const dateValue = String(item.remittance_date || "");
+          return dateValue && (!filters.from || dateValue >= filters.from) && (!filters.to || dateValue <= filters.to);
+        });
+        const uniqueCrfs = new Map<string, RemittanceImport>();
+        for (const item of inRange) {
+          const key = `${(item.crf_ids || []).join(",")}|${item.remittance_date || ""}`;
+          if (!uniqueCrfs.has(key)) uniqueCrfs.set(key, item);
         }
+        const available = [...uniqueCrfs.values()];
+        setRemittanceImports(available);
+        const defaultId = available.length > 1 ? "ALL" : String(available[0]?.id || "");
+        const selectedId = selectedRemittanceImportId === "ALL" || available.some((item) => item.id === selectedRemittanceImportId) ? selectedRemittanceImportId : defaultId;
+        if (selectedId !== selectedRemittanceImportId) setSelectedRemittanceImportId(selectedId);
+        const selectedImports = selectedId === "ALL" ? available : available.filter((item) => item.id === selectedId);
+        const bridges = await Promise.all(selectedImports.map(async (item) => {
+          const bridge = await fetch(`/api/journey/remittance-reconciliation?importId=${encodeURIComponent(String(item.id))}&from=${encodeURIComponent(filters.from || "")}&to=${encodeURIComponent(filters.to || "")}`);
+          return bridge.ok ? await bridge.json() as RemittanceReconciliation : null;
+        }));
+        setRemittanceReconciliation(combineRemittanceReconciliations(bridges.filter((item): item is RemittanceReconciliation => Boolean(item))));
       }
     } catch (err) { setError(err instanceof Error ? err.message : "Journey dashboard failed"); }
     finally { setLoading(false); }
-  }, [params, level, filters]);
+  }, [params, level, filters, selectedRemittanceImportId]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -149,7 +205,7 @@ export default function JourneyDashboard() {
 
       {error && <div className="journey-error">{error}</div>}
       {operationalLookup.length > 0 && <section className="journey-scope-note"><strong>Operational lookup:</strong> no Shopify journey row matched this exact identifier, but a Shiprocket record was found. {operationalLookup.map((item, index) => <span key={index}> {text(item.result_type)} · SR {text(item.sr_order_id)} · AWB {text(item.awb)} · {text(item.status_bucket || item.current_status)}{item.remittance ? ` · CRF ${text((item.remittance as Record<string, unknown>).crf_id)}` : ""}</span>)} This is a fulfilment/settlement result and is not inserted into the one-row-per-Shopify-order mart.</section>}
-      {remittanceReconciliation && <section className="journey-scope-note journey-remittance-reconciliation"><div className="panel-heading"><div><h2>Remittance reconciliation</h2><p>Selected CRF {text(remittanceReconciliation.crfId)} · source-file rows remain separate from the one-row-per-Shopify Journey cohort.</p></div><span>{number(remittanceReconciliation.summary.sourceRows)} source rows</span></div><div className="journey-reconciliation-grid"><div><span>Source remittance rows</span><strong>{number(remittanceReconciliation.summary.sourceRows)}</strong></div><div><span>Shiprocket matched</span><strong>{number(remittanceReconciliation.summary.shiprocketMatched)}</strong></div><div><span>Shopify matched</span><strong>{number(remittanceReconciliation.summary.shopifyMatched)}</strong></div><div><span>Journey rows present</span><strong>{number(remittanceReconciliation.summary.journeyRowsExist)}</strong></div><div><span>Visible in current range</span><strong>{number(remittanceReconciliation.summary.insideJourneyCohort)}</strong></div><div><span>Excluded / not represented</span><strong>{number(remittanceReconciliation.summary.needsReview)}</strong></div></div><p className="journey-scope-note">{number(remittanceReconciliation.summary.insideJourneyCohort)} visible Journey orders + {number(remittanceReconciliation.summary.needsReview)} excluded remittance rows = {number(remittanceReconciliation.summary.sourceRows)} selected source rows.</p><details><summary>View discrepancies ({number(remittanceReconciliation.summary.needsReview)})</summary><div className="table-scroll"><table className="orders-table"><thead><tr><th>Order</th><th>AWB</th><th>SR Order</th><th>Shopify Order</th><th>Shopify Date</th><th>Delivery</th><th>Remittance</th><th>Reason</th><th>Details</th></tr></thead><tbody>{remittanceReconciliation.rows.filter((row) => !row.includedInJourney).map((row, index) => { const source = row.source as Record<string, unknown>; const journey = row.journey as Record<string, unknown> | null; const shopify = row.shopify as Record<string, unknown> | null; const delivery = row.delivery as Record<string, unknown> | null; const reason = String(row.finalReason || "OTHER"); const details = reason === "OUTSIDE_CUSTOMER_JOURNEY_COHORT" ? `Shopify order date ${text(journey?.order_date || journey?.created_at_shopify || shopify?.created_at_shopify)} is outside the selected Journey range.` : reason === "NO_SHOPIFY_MATCH" ? "No Shopify source order or Journey row was found." : reason; return <tr key={index}><td>{text(source.order_id)}</td><td>{text(source.awb)}</td><td>{text(source.matched_sr_order_id)}</td><td>{text(shopify?.shopify_order_id, "NONE")}</td><td>{text(shopify?.created_at_shopify || journey?.order_date, "NONE")}</td><td>{text(delivery?.outcome)}</td><td>{text(journey?.remittance_status || source.match_status)}</td><td>{badge(reason)}</td><td>{details}</td></tr>; })}</tbody></table></div></details></section>}
+      {!loading && <RemittanceReconciliationPanel imports={remittanceImports} selectedId={selectedRemittanceImportId} reconciliation={remittanceReconciliation} onSelect={setSelectedRemittanceImportId} />}
 
       <section className="journey-filters">
         <label>From<input type="date" value={filters.from || ""} onChange={(e) => update("from", e.target.value)} /></label>
