@@ -1,4 +1,5 @@
 import { getSupabaseClient } from "@/lib/supabase/admin";
+import { resolveCanonicalDeliveryState } from "@/modules/shiprocket/status";
 import type {
   JourneyFilter,
   JourneyListRequest,
@@ -10,13 +11,13 @@ import type {
 const JOURNEY_COLUMNS = [
   "shopify_order_id", "order_name", "order_number", "created_at_shopify", "order_date",
   "customer_key", "currency", "ordered_revenue", "current_revenue", "delivered_current_revenue", "financial_status", "fulfillment_status",
-  "payment_type", "channel", "meta_attribution_state", "attribution_method",
+  "payment_type", "is_cod", "shopify_payment_gateway_names", "channel", "meta_attribution_state", "attribution_method",
   "resolved_campaign_id", "resolved_campaign_name", "resolved_adset_id", "resolved_adset_name",
   "resolved_ad_id", "resolved_ad_name", "hierarchy_conflict", "shiprocket_match_status",
   "shiprocket_sr_order_id", "awb", "shipment_id", "courier_name", "shiprocket_status_raw",
   "shiprocket_status_id", "shiprocket_current_status_raw", "shiprocket_current_status_id", "delivery_outcome", "is_shipped", "is_delivered", "is_rto",
   "is_ndr", "had_ndr", "is_cancelled", "undelivered_reason", "undelivered_reason_code", "delivery_attempt_count", "shipped_at", "delivered_at", "remittance_status",
-  "latest_remitted_at", "remitted_amount", "crf_id", "utr", "journey_stage",
+  "latest_remitted_at", "remitted_amount", "remittance_order_value_total", "latest_total_adjusted_amt", "latest_remittance_date", "crf_id", "utr", "journey_stage",
   "journey_data_quality", "has_remittance_match",
   "has_exact_meta_attribution", "has_shiprocket_match",
 ].join(",");
@@ -106,10 +107,17 @@ async function fetchAllJourney(filters: JourneyFilter): Promise<JourneyRow[]> {
   if (cached && cached.expiresAt > Date.now()) return cached.promise;
   const client = getSupabaseClient();
   const promise = (async () => {
+    // Remittance status is canonical only after the matched remittance rows
+    // are merged. Do not let the stale mart value remove rows first.
+    // Delivery outcome can be corrected by persisted scan evidence, so do not
+    // let the stale view filter those rows out before canonical resolution.
+    const queryFilters = (filters.remittanceStatus || filters.delivered || filters.shipmentStatus)
+      ? { ...filters, remittanceStatus: undefined, delivered: undefined, shipmentStatus: undefined }
+      : filters;
     const rows: JourneyRow[] = [];
     for (let offset = 0; offset < 20000; offset += 1000) {
-      let query = client.from("mart_order_journey_ndr").select(JOURNEY_COLUMNS);
-      query = applyJourneyFilters(query, filters)
+      let query = client.from("mart_order_journey_remittance").select(JOURNEY_COLUMNS);
+      query = applyJourneyFilters(query, queryFilters)
         .order("shopify_order_id", { ascending: true })
         .range(offset, offset + 999);
       const { data, error } = await query;
@@ -117,37 +125,54 @@ async function fetchAllJourney(filters: JourneyFilter): Promise<JourneyRow[]> {
       rows.push(...((data || []) as unknown as JourneyRow[]));
       if (!data || data.length < 1000) break;
     }
+    const srIds = [...new Set(rows.map((row) => String(row.shiprocket_sr_order_id || "")).filter(Boolean))];
+    const scansBySr = new Map<string, Array<Record<string, unknown>>>();
+    for (let offset = 0; offset < srIds.length; offset += 500) {
+      const ids = srIds.slice(offset, offset + 500);
+      const { data: scans, error: scanError } = await client.from("shiprocket_scans")
+        .select("sr_order_id,scan_date,status,sr_status,sr_status_label,activity")
+        .in("sr_order_id", ids);
+      if (scanError) throw new Error(`Journey delivery scan lookup failed: ${scanError.message}`);
+      for (const scan of scans || []) {
+        const key = String(scan.sr_order_id);
+        scansBySr.set(key, [...(scansBySr.get(key) || []), scan as Record<string, unknown>]);
+      }
+    }
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const state = resolveCanonicalDeliveryState({
+        shipmentStatus: String(row.shiprocket_status_raw || ""),
+        currentStatus: String(row.shiprocket_current_status_raw || ""),
+        shipmentStatusId: row.shiprocket_status_id,
+        currentStatusId: row.shiprocket_current_status_id,
+        orderStatus: row.shiprocket_order_status,
+        deliveredDate: row.delivered_at ? String(row.delivered_at) : null,
+        awb: String(row.awb || "") || null,
+        scans: scansBySr.get(String(row.shiprocket_sr_order_id || "")) || [],
+      });
+      rows[index] = { ...row, delivery_outcome: state.outcome, is_delivered: state.isDelivered, is_rto: state.isRto, is_ndr: state.isNdr, delivered_at: row.delivered_at || state.deliveredDate, canonical_delivery_source: state.source };
+    }
     // Propagate the canonical Shiprocket remittance match into the journey.
     // The Day-3 view historically gated remittance status on COD, which made
     // valid delivered matches disappear when Shopify payment enrichment was
     // unavailable. Match by the importer-established matched_sr_order_id.
-    const srIds = [...new Set(rows.map((row) => String(row.shiprocket_sr_order_id || "")).filter(Boolean))];
+    const canonicalRemittances: Record<string, unknown>[] = [];
     for (let offset = 0; offset < srIds.length; offset += 500) {
       const ids = srIds.slice(offset, offset + 500);
       const { data: remittances } = await client.from("shiprocket_remittance_orders")
-        .select("matched_sr_order_id,crf_id,utr,remittance_date,total_adjusted_amt,match_status")
+        .select("matched_sr_order_id,crf_id,utr,remittance_date,order_value,total_adjusted_amt,match_status,match_method,match_reason_code")
         .in("matched_sr_order_id", ids)
         .eq("match_status", "matched");
-      const bySr = new Map<string, Record<string, unknown>>();
-      for (const remittance of remittances || []) {
-        const key = String(remittance.matched_sr_order_id || "");
-        if (!key) continue;
-        const previous = bySr.get(key);
-        if (!previous || String(remittance.remittance_date || "") > String(previous.remittance_date || "")) bySr.set(key, remittance as Record<string, unknown>);
-      }
-      for (const row of rows) {
-        const match = bySr.get(String(row.shiprocket_sr_order_id || ""));
-        if (!match) continue;
-        row.has_remittance_match = true;
-        row.remittance_match_status = "MATCHED";
-        row.remittance_status = "REMITTED";
-        row.crf_id = match.crf_id ?? row.crf_id;
-        row.utr = match.utr ?? row.utr;
-        row.latest_remitted_at = match.remittance_date ?? row.latest_remitted_at;
-        row.remitted_amount = match.total_adjusted_amt ?? row.remitted_amount;
-      }
+      canonicalRemittances.push(...((remittances || []) as Record<string, unknown>[]));
     }
-    return rows;
+    const canonicalRows = mergeCanonicalRemittance(rows, canonicalRemittances);
+    const deliveryFiltered = canonicalRows.filter((row) =>
+      (!filters.delivered || (filters.delivered === "true" ? Boolean(row.is_delivered) : !row.is_delivered))
+      && (!filters.shipmentStatus || String(row.delivery_outcome || "") === filters.shipmentStatus)
+    );
+    return filters.remittanceStatus
+      ? deliveryFiltered.filter((row) => String(row.remittance_status || "") === filters.remittanceStatus)
+      : deliveryFiltered;
   })();
   journeyFetchCache.set(key, { promise, expiresAt: Date.now() + 15000 });
   void promise.catch(() => journeyFetchCache.delete(key));

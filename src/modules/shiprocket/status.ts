@@ -6,10 +6,101 @@ export type ShiprocketStatusBucket =
   | "ndr"
   | "other";
 
+export type CanonicalDeliveryOutcome = "DELIVERED" | "RTO" | "NDR_OPEN" | "IN_TRANSIT" | "CANCELLED" | "UNKNOWN";
+
+export interface DeliveryStateInput {
+  statusBucket?: unknown;
+  shipmentStatus?: unknown;
+  currentStatus?: unknown;
+  shipmentStatusId?: unknown;
+  currentStatusId?: unknown;
+  orderStatus?: unknown;
+  deliveredDate?: string | null;
+  awb?: unknown;
+  scans?: Array<Record<string, unknown>>;
+}
+
+
+export interface CanonicalDeliveryState {
+  outcome: CanonicalDeliveryOutcome;
+  isDelivered: boolean;
+  isRto: boolean;
+  isNdr: boolean;
+  deliveredDate: string | null;
+  source: "STATUS" | "DELIVERED_DATE" | "SCAN_TIMELINE" | "UNKNOWN";
+  statusConflict: boolean;
+}
+
+function normalized(value: unknown): string {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+function isRtoText(value: unknown): boolean {
+  return normalized(value).includes("RTO") || normalized(value).includes("RETURN TO");
+}
+
+function isForwardDeliveryScan(scan: Record<string, unknown>): boolean {
+  const text = [scan.status, scan.sr_status_label, scan.activity, scan.sr_status].map(normalized).join(" ");
+  if (isRtoText(text) || text.includes("RETURN")) return false;
+  return normalized(scan.sr_status) === "7"
+    || normalized(scan.sr_status_label) === "DELIVERED"
+    || text.includes("000-T-DL")
+    || text.includes("SHIPMENT DELIVERED");
+}
+
+function isRtoScan(scan: Record<string, unknown>): boolean {
+  return isRtoText([scan.status, scan.sr_status_label, scan.activity].map(normalized).join(" "));
+}
+
+function latestScan(scans: Array<Record<string, unknown>>): Record<string, unknown> | null {
+  return [...scans].sort((left, right) =>
+    String(left.scan_date ?? left.date ?? "").localeCompare(String(right.scan_date ?? right.date ?? ""))
+      || Number(left.scan_index ?? 0) - Number(right.scan_index ?? 0)
+  ).at(-1) || null;
+}
+
+/** One delivery interpretation shared by operational, remittance, and Journey code. */
+export function resolveCanonicalDeliveryState(input: DeliveryStateInput): CanonicalDeliveryState {
+  const shipment = normalized(input.shipmentStatus);
+  const current = normalized(input.currentStatus);
+  const scans = input.scans || [];
+  const latest = latestScan(scans);
+  if (shipment.includes("CANCEL") || current.includes("CANCELED") || normalized(input.orderStatus) === "NEW") {
+    return { outcome: "CANCELLED", isDelivered: false, isRto: false, isNdr: false, deliveredDate: null, source: "STATUS", statusConflict: false };
+  }
+  const rto = isRtoText(shipment) || isRtoText(current);
+  if (rto || (latest && isRtoScan(latest))) return { outcome: "RTO", isDelivered: false, isRto: true, isNdr: false, deliveredDate: null, source: "STATUS", statusConflict: false };
+
+  if (shipment === "DELIVERED" || current === "DELIVERED" || normalized(input.shipmentStatusId) === "7" || normalized(input.currentStatusId) === "7") {
+    return { outcome: "DELIVERED", isDelivered: true, isRto: false, isNdr: false, deliveredDate: input.deliveredDate || null, source: "STATUS", statusConflict: false };
+  }
+  if (input.deliveredDate) {
+    return { outcome: "DELIVERED", isDelivered: true, isRto: false, isNdr: false, deliveredDate: input.deliveredDate, source: "DELIVERED_DATE", statusConflict: false };
+  }
+  const deliveryScan = scans.find(isForwardDeliveryScan);
+  if (deliveryScan) {
+    return { outcome: "DELIVERED", isDelivered: true, isRto: false, isNdr: false, deliveredDate: String(deliveryScan.scan_date || deliveryScan.date || "") || null, source: "SCAN_TIMELINE", statusConflict: true };
+  }
+  const bucket = normalized(input.statusBucket);
+  if (bucket === "DELIVERED") return { outcome: "DELIVERED", isDelivered: true, isRto: false, isNdr: false, deliveredDate: null, source: "STATUS", statusConflict: false };
+  if (bucket === "RTO") return { outcome: "RTO", isDelivered: false, isRto: true, isNdr: false, deliveredDate: null, source: "STATUS", statusConflict: false };
+  if (bucket === "NDR") return { outcome: "NDR_OPEN", isDelivered: false, isRto: false, isNdr: true, deliveredDate: null, source: "STATUS", statusConflict: false };
+  const ndr = shipment === "UNDELIVERED" || current === "UNDELIVERED" || shipment.includes("NDR") || current.includes("NDR");
+  if (ndr) return { outcome: "NDR_OPEN", isDelivered: false, isRto: false, isNdr: true, deliveredDate: null, source: "STATUS", statusConflict: false };
+  if (shipment.includes("TRANSIT") || current.includes("TRANSIT") || input.awb) {
+    return { outcome: "IN_TRANSIT", isDelivered: false, isRto: false, isNdr: false, deliveredDate: null, source: "STATUS", statusConflict: false };
+  }
+  return { outcome: "UNKNOWN", isDelivered: false, isRto: false, isNdr: false, deliveredDate: null, source: "UNKNOWN", statusConflict: false };
+}
+
 export function classifyShiprocketStatus(
   shipmentStatus?: string | null,
   currentStatus?: string | null
 ): ShiprocketStatusBucket {
+  const resolved = resolveCanonicalDeliveryState({ shipmentStatus, currentStatus });
+  if (resolved.outcome === "DELIVERED") return "delivered";
+  if (resolved.outcome === "RTO") return "rto";
+  if (resolved.outcome === "NDR_OPEN") return "ndr";
   const text = `${shipmentStatus ?? ""} ${currentStatus ?? ""}`.toUpperCase();
   if (text.includes("RTO")) return "rto";
   if (text.includes("NDR")) return "ndr";

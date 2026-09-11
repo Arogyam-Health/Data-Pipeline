@@ -8,13 +8,67 @@ import {
 } from "./filters";
 import { buildLegacyPabblyPayload, LEGACY_PABBLY_HEADERS } from "./legacy";
 import { SHIPROCKET_EXPLORER_COLUMNS } from "./explorer-contract";
-import { classifyShiprocketStatus, computeOverviewFromRows, type OverviewRowInput, type ShiprocketOverview } from "./status";
+import { computeOverviewFromRows, resolveCanonicalDeliveryState, type OverviewRowInput, type ShiprocketOverview } from "./status";
 import type { ShiprocketExplorerRow } from "./types";
 
 const LIST_COLUMNS = SHIPROCKET_EXPLORER_COLUMNS.join(",");
 
 function canonicalDelivered(row: Record<string, unknown>): boolean {
-  return (row.status_bucket ? row.status_bucket : classifyShiprocketStatus(String(row.shipment_status || ""), String(row.current_status || ""))) === "delivered";
+  return resolveCanonicalDeliveryState({
+    statusBucket: row.status_bucket,
+    shipmentStatus: String(row.shipment_status || ""), currentStatus: String(row.current_status || ""),
+    shipmentStatusId: row.shipment_status_id, currentStatusId: row.current_status_id,
+    orderStatus: row.order_status,
+    deliveredDate: String(row.delivered_date || "") || null,
+    scans: [row].flatMap((item) => [
+      { status: item.scans0_status, sr_status_label: item.scans0_sr_status_label, sr_status: item.scans0_sr_status, date: item.scans0_date, activity: item.scans0_activity },
+      { status: item.scans1_status, sr_status_label: item.scans1_sr_status_label, sr_status: item.scans1_sr_status, date: item.scans1_date, activity: item.scans1_activity },
+    ]),
+  }).isDelivered;
+}
+
+function canonicalizeExplorerRow(row: Record<string, unknown>, history: Array<Record<string, unknown>> = []): Record<string, unknown> {
+  const state = resolveCanonicalDeliveryState({
+    statusBucket: row.status_bucket,
+    shipmentStatus: String(row.shipment_status || ""), currentStatus: String(row.current_status || ""),
+    shipmentStatusId: row.shipment_status_id, currentStatusId: row.current_status_id,
+    orderStatus: row.order_status,
+    deliveredDate: String(row.delivered_date || "") || null,
+    awb: String(row.awb || "") || null,
+    scans: [...history, ...[
+      { status: row.scans0_status, sr_status_label: row.scans0_sr_status_label, sr_status: row.scans0_sr_status, scan_date: row.scans0_date, activity: row.scans0_activity },
+      { status: row.scans1_status, sr_status_label: row.scans1_sr_status_label, sr_status: row.scans1_sr_status, scan_date: row.scans1_date, activity: row.scans1_activity },
+    ]],
+  });
+  return {
+    ...row,
+    status_bucket: state.outcome === "DELIVERED" ? "delivered" : state.outcome === "RTO" ? "rto" : state.outcome === "NDR_OPEN" ? "ndr" : state.outcome === "IN_TRANSIT" ? "in_transit" : row.status_bucket,
+    delivery_outcome: state.outcome,
+    is_delivered: state.isDelivered,
+    is_rto: state.isRto,
+    is_ndr: state.isNdr,
+    delivered_date: row.delivered_date || state.deliveredDate,
+    canonical_delivery_source: state.source,
+    status_conflict: state.statusConflict,
+  };
+}
+
+async function canonicalizeExplorerRows(rows: Array<Record<string, unknown>>): Promise<Record<string, unknown>[]> {
+  const ids = [...new Set(rows.map((row) => String(row.sr_order_id || "")).filter(Boolean))];
+  const history = new Map<string, Array<Record<string, unknown>>>();
+  const supabase = getSupabaseClient();
+  for (let offset = 0; offset < ids.length; offset += 500) {
+    const batch = ids.slice(offset, offset + 500);
+    const { data, error } = await supabase.from("shiprocket_scans")
+      .select("sr_order_id,scan_date,status,sr_status,sr_status_label,activity")
+      .in("sr_order_id", batch);
+    if (error) throw new Error(`Shiprocket delivery scan lookup failed: ${error.message}`);
+    for (const scan of data || []) {
+      const key = String(scan.sr_order_id);
+      history.set(key, [...(history.get(key) || []), scan as Record<string, unknown>]);
+    }
+  }
+  return rows.map((row) => canonicalizeExplorerRow(row, history.get(String(row.sr_order_id || "")) || []));
 }
 
 export function reconciliationStatus(row: Record<string, unknown>): string {

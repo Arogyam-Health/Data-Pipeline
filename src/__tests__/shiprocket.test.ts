@@ -30,7 +30,7 @@ import {
   normalizeBusinessIdentifier,
   parseRemittanceWorkbook,
 } from "../modules/shiprocket/remittance";
-import { classifyShiprocketStatus, computeOverviewFromRows } from "../modules/shiprocket/status";
+import { classifyShiprocketStatus, computeOverviewFromRows, resolveCanonicalDeliveryState } from "../modules/shiprocket/status";
 import { reconciliationStatus } from "../modules/shiprocket/query";
 
 // ============================================================
@@ -835,6 +835,70 @@ describe("Remittance matching", () => {
 });
 
 describe("KPI and table consistency", () => {
+  it("uses a strong forward-delivery scan even when current status is stale", () => {
+    const state = resolveCanonicalDeliveryState({
+      currentStatus: "IN TRANSIT",
+      shipmentStatus: "IN TRANSIT",
+      scans: [{ scan_date: "2026-08-30", sr_status: "7", sr_status_label: "DELIVERED", activity: "SHIPMENT DELIVERED" }],
+    });
+    expect(state).toMatchObject({ outcome: "DELIVERED", deliveredDate: "2026-08-30", source: "SCAN_TIMELINE" });
+  });
+
+  it("does not treat an RTO delivery scan as customer delivery", () => {
+    const state = resolveCanonicalDeliveryState({
+      currentStatus: "RTO DELIVERED",
+      shipmentStatus: "RTO DELIVERED",
+      scans: [{ scan_date: "2026-08-30", sr_status: "7", sr_status_label: "DELIVERED", activity: "RTO DELIVERED TO SELLER" }],
+    });
+    expect(state).toMatchObject({ outcome: "RTO", isDelivered: false, isRto: true });
+  });
+
+  it("allows a later forward delivery scan to close an earlier NDR", () => {
+    const state = resolveCanonicalDeliveryState({
+      currentStatus: "UNDELIVERED",
+      shipmentStatus: "UNDELIVERED",
+      scans: [
+        { scan_date: "2026-08-29", sr_status: "23", sr_status_label: "UNDELIVERED", activity: "CUSTOMER NOT AVAILABLE" },
+        { scan_date: "2026-08-30", sr_status: "7", sr_status_label: "DELIVERED", activity: "SHIPMENT DELIVERED" },
+      ],
+    });
+    expect(state).toMatchObject({ outcome: "DELIVERED", isDelivered: true, isNdr: false, source: "SCAN_TIMELINE" });
+  });
+
+  it("keeps a real transit shipment in transit when delivery evidence is absent", () => {
+    expect(resolveCanonicalDeliveryState({ shipmentStatus: "IN TRANSIT", currentStatus: "IN TRANSIT", awb: "77900000000" })).toMatchObject({
+      outcome: "IN_TRANSIT", isDelivered: false, isRto: false,
+    });
+  });
+
+  it("uses delivered_date when top-level status is stale", () => {
+    expect(resolveCanonicalDeliveryState({ shipmentStatus: "IN TRANSIT", currentStatus: "IN TRANSIT", deliveredDate: "2026-08-30T14:40:00Z" })).toMatchObject({
+      outcome: "DELIVERED", isDelivered: true, deliveredDate: "2026-08-30T14:40:00Z", source: "DELIVERED_DATE",
+    });
+  });
+
+  it("lets a terminal RTO scan override an earlier delivered date", () => {
+    expect(resolveCanonicalDeliveryState({ deliveredDate: "2026-08-30T14:40:00Z", scans: [
+      { scan_date: "2026-08-30T14:40:00Z", sr_status: "7", sr_status_label: "DELIVERED", activity: "SHIPMENT DELIVERED" },
+      { scan_date: "2026-09-01T11:50:00Z", sr_status: "10", sr_status_label: "RTO DELIVERED", activity: "SIGNATURE IMAGE" },
+    ] })).toMatchObject({ outcome: "RTO", isDelivered: false, isRto: true });
+  });
+
+  it("uses authoritative cancellation precedence", () => {
+    expect(resolveCanonicalDeliveryState({ shipmentStatus: "CANCELLED", currentStatus: "CANCELLED", awb: "77900000000" })).toMatchObject({
+      outcome: "CANCELLED", isDelivered: false, isRto: false,
+    });
+  });
+
+  it("uses canonical scan delivery in operations aggregates", () => {
+    const overview = computeOverviewFromRows([{
+      sr_order_id: "1515536430", status_bucket: "in_transit", shipment_status: "IN TRANSIT", current_status: "IN TRANSIT",
+      awb: "77920686373", payment_method: "COD", scans0_status: "000-T-DL", scans0_sr_status: "7",
+      scans0_sr_status_label: "DELIVERED", scans0_date: "2026-08-30 14:40:00", scans0_activity: "SHIPMENT DELIVERED",
+    }]);
+    expect(overview).toMatchObject({ delivered: 1, inTransit: 0 });
+  });
+
   it("classifies delivery/remittance intersections independently", () => {
     expect(reconciliationStatus({ status_bucket: "delivered", payment_bucket: "COD", remittance_match_status: "matched" })).toBe("DELIVERED_REMITTED");
     expect(reconciliationStatus({ status_bucket: "delivered", payment_bucket: "COD", remittance_match_status: "unmatched" })).toBe("DELIVERED_NOT_REMITTED");
