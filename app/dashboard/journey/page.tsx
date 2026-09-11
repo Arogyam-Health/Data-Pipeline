@@ -108,6 +108,7 @@ export default function JourneyDashboard() {
   const [remittanceReconciliation, setRemittanceReconciliation] = useState<RemittanceReconciliation | null>(null);
   const [remittanceImports, setRemittanceImports] = useState<RemittanceImport[]>([]);
   const [selectedRemittanceImportId, setSelectedRemittanceImportId] = useState("");
+  const [remittanceSelectionMode, setRemittanceSelectionMode] = useState<"auto" | "manual">("auto");
 
   const params = useMemo(() => {
     const p = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
@@ -146,11 +147,16 @@ export default function JourneyDashboard() {
           const key = `${(item.crf_ids || []).join(",")}|${item.remittance_date || ""}`;
           if (!uniqueCrfs.has(key)) uniqueCrfs.set(key, item);
         }
-        const available = [...uniqueCrfs.values()];
+        const available = [...uniqueCrfs.values()].sort((a, b) => String(b.remittance_date || "").localeCompare(String(a.remittance_date || "")));
         setRemittanceImports(available);
-        const defaultId = available.length > 1 ? "ALL" : String(available[0]?.id || "");
-        const selectedId = selectedRemittanceImportId === "ALL" || available.some((item) => item.id === selectedRemittanceImportId) ? selectedRemittanceImportId : defaultId;
+        // Imports are returned newest-first; default to the latest distinct
+        // business CRF by normalized ISO remittance date. Preserve an
+        // explicit user choice only while that CRF remains in the range.
+        const defaultId = String(available[0]?.id || "");
+        const currentIsAvailable = selectedRemittanceImportId === "ALL" || available.some((item) => item.id === selectedRemittanceImportId);
+        const selectedId = remittanceSelectionMode === "manual" && currentIsAvailable ? selectedRemittanceImportId : defaultId;
         if (selectedId !== selectedRemittanceImportId) setSelectedRemittanceImportId(selectedId);
+        if (remittanceSelectionMode === "manual" && !currentIsAvailable) setRemittanceSelectionMode("auto");
         const selectedImports = selectedId === "ALL" ? available : available.filter((item) => item.id === selectedId);
         const bridges = await Promise.all(selectedImports.map(async (item) => {
           const bridge = await fetch(`/api/journey/remittance-reconciliation?importId=${encodeURIComponent(String(item.id))}&from=${encodeURIComponent(filters.from || "")}&to=${encodeURIComponent(filters.to || "")}`);
@@ -160,7 +166,7 @@ export default function JourneyDashboard() {
       }
     } catch (err) { setError(err instanceof Error ? err.message : "Journey dashboard failed"); }
     finally { setLoading(false); }
-  }, [params, level, filters, selectedRemittanceImportId]);
+  }, [params, level, filters, selectedRemittanceImportId, remittanceSelectionMode]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -205,7 +211,7 @@ export default function JourneyDashboard() {
 
       {error && <div className="journey-error">{error}</div>}
       {operationalLookup.length > 0 && <section className="journey-scope-note"><strong>Operational lookup:</strong> no Shopify journey row matched this exact identifier, but a Shiprocket record was found. {operationalLookup.map((item, index) => <span key={index}> {text(item.result_type)} · SR {text(item.sr_order_id)} · AWB {text(item.awb)} · {text(item.status_bucket || item.current_status)}{item.remittance ? ` · CRF ${text((item.remittance as Record<string, unknown>).crf_id)}` : ""}</span>)} This is a fulfilment/settlement result and is not inserted into the one-row-per-Shopify-order mart.</section>}
-      {!loading && <RemittanceReconciliationPanel imports={remittanceImports} selectedId={selectedRemittanceImportId} reconciliation={remittanceReconciliation} onSelect={setSelectedRemittanceImportId} />}
+      {!loading && <RemittanceReconciliationPanel imports={remittanceImports} selectedId={selectedRemittanceImportId} reconciliation={remittanceReconciliation} onSelect={(id) => { setSelectedRemittanceImportId(id); setRemittanceSelectionMode("manual"); }} />}
 
       <section className="journey-filters">
         <label>From<input type="date" value={filters.from || ""} onChange={(e) => update("from", e.target.value)} /></label>
