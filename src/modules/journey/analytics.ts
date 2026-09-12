@@ -22,9 +22,22 @@ const JOURNEY_COLUMNS = [
   "has_exact_meta_attribution", "has_shiprocket_match",
 ].join(",");
 // mart_order_journey_ndr is the underlying Journey-grain source used for the
-// bulk fetch. latest_total_adjusted_amt is added only by the remittance
-// wrapper, so it must not be requested from the NDR view.
-const JOURNEY_FETCH_COLUMNS = JOURNEY_COLUMNS.replace(",latest_total_adjusted_amt", "");
+// bulk fetch. Keep this projection explicit: latest_total_adjusted_amt and
+// latest_remittance_date are added by mart_order_journey_remittance, not by
+// the NDR view. Remittance values are merged from effective evidence below.
+export const JOURNEY_NDR_FETCH_COLUMNS = [
+  "shopify_order_id", "order_name", "order_number", "created_at_shopify", "order_date",
+  "customer_key", "currency", "ordered_revenue", "current_revenue", "delivered_current_revenue", "financial_status", "fulfillment_status",
+  "payment_type", "is_cod", "shopify_payment_gateway_names", "channel", "meta_attribution_state", "attribution_method",
+  "resolved_campaign_id", "resolved_campaign_name", "resolved_adset_id", "resolved_adset_name",
+  "resolved_ad_id", "resolved_ad_name", "hierarchy_conflict", "shiprocket_match_status",
+  "shiprocket_sr_order_id", "awb", "shipment_id", "courier_name", "shiprocket_status_raw",
+  "shiprocket_status_id", "shiprocket_current_status_raw", "shiprocket_current_status_id", "delivery_outcome", "is_shipped", "is_delivered", "is_rto",
+  "is_ndr", "had_ndr", "is_cancelled", "undelivered_reason", "undelivered_reason_code", "delivery_attempt_count", "shipped_at", "delivered_at", "remittance_status",
+  "latest_remitted_at", "remitted_amount", "remittance_order_value_total", "crf_id", "utr", "journey_stage",
+  "journey_data_quality", "has_remittance_match",
+  "has_exact_meta_attribution", "has_shiprocket_match",
+].join(",");
 
 const ATTRIBUTION_COLUMNS = [
   "shopify_order_id", "utm_source_raw", "utm_medium_raw", "utm_campaign_raw", "utm_term_raw",
@@ -157,7 +170,7 @@ async function fetchAllJourney(filters: JourneyFilter): Promise<JourneyRow[]> {
       // remittance wrapper here would execute its latest-remittance join for
       // the whole cohort (and can time out before the effective merge runs).
       // The NDR mart contains the same Journey row grain and delivery fields.
-      let query = client.from("mart_order_journey_ndr").select(JOURNEY_FETCH_COLUMNS);
+      let query = client.from("mart_order_journey_ndr").select(JOURNEY_NDR_FETCH_COLUMNS);
       query = applyJourneyFilters(query, queryFilters);
       if (effectiveRemittanceSrIds) query = query.in("shiprocket_sr_order_id", effectiveRemittanceSrIds);
       query = query.order("shopify_order_id", { ascending: true }).range(offset, offset + 999);

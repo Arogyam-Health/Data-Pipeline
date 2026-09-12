@@ -1,7 +1,30 @@
-import { aggregateProfitability, canonicalChannel, computeJourneySummary, fetchAllMetaProfitabilityRows, mergeCanonicalRemittance, normalizedAttributionStatus, splitCohortFilters } from "../modules/journey/analytics";
+import { aggregateProfitability, canonicalChannel, computeJourneySummary, fetchAllMetaProfitabilityRows, JOURNEY_NDR_FETCH_COLUMNS, mergeCanonicalRemittance, normalizedAttributionStatus, splitCohortFilters } from "../modules/journey/analytics";
 import { reconcileRemittanceRows, summarizeRemittanceReconciliation } from "../modules/journey/reconciliation";
 
 describe("customer journey and profitability", () => {
+  it("uses only columns exposed by the NDR mart for bulk Journey reads", () => {
+    expect(JOURNEY_NDR_FETCH_COLUMNS).toContain("shopify_order_id");
+    expect(JOURNEY_NDR_FETCH_COLUMNS).toContain("delivery_outcome");
+    expect(JOURNEY_NDR_FETCH_COLUMNS).toContain("had_ndr");
+    expect(JOURNEY_NDR_FETCH_COLUMNS).not.toContain("latest_total_adjusted_amt");
+    expect(JOURNEY_NDR_FETCH_COLUMNS).not.toContain("latest_remittance_date");
+    expect(JOURNEY_NDR_FETCH_COLUMNS).not.toContain("latest_remittance_match_method");
+    expect(JOURNEY_NDR_FETCH_COLUMNS).not.toContain("latest_remittance_match_reason_code");
+  });
+
+  it("populates remittance fields from effective evidence after the NDR fetch", () => {
+    const [row] = mergeCanonicalRemittance(
+      [{ shopify_order_id: "O1", shiprocket_sr_order_id: "SR1", payment_type: "COD", is_delivered: true }],
+      [{ matched_sr_order_id: "SR1", match_status: "matched", remittance_date: "2026-09-09", crf_id: "13440384", utr: "IN1", order_value: 10140, total_adjusted_amt: 0 }],
+    );
+    expect(row.remittance_status).toBe("REMITTED");
+    expect(row.latest_remittance_date).toBe("2026-09-09");
+    expect(row.crf_id).toBe("13440384");
+    expect(row.utr).toBe("IN1");
+    expect(row.remitted_amount).toBe(10140);
+    expect(row.remittance_adjustment).toBe(0);
+  });
+
   it("loads every Meta profitability page", async () => {
     const calls: number[] = [];
     const rows = await fetchAllMetaProfitabilityRows(async (offset, pageSize) => {
