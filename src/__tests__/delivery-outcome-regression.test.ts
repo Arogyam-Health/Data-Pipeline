@@ -22,6 +22,33 @@ describe("canonical delivery outcome regressions", () => {
     })).toMatchObject({ outcome: "DELIVERED", isDelivered: true });
   });
 
+  it.each([
+    "27 08 2026 16:10:00",
+    "2026-08-27 16:10:00",
+  ])("treats a non-empty delivered date as delivery evidence: %s", (deliveredDate) => {
+    expect(resolveCanonicalDeliveryState({
+      shipmentStatus: "UNDELIVERED",
+      currentStatus: "UNDELIVERED",
+      deliveredDate,
+    })).toMatchObject({ outcome: "DELIVERED", isDelivered: true, source: "DELIVERED_DATE" });
+  });
+
+  it("falls back to NDR when delivered_date is empty", () => {
+    expect(resolveCanonicalDeliveryState({
+      shipmentStatus: "UNDELIVERED",
+      currentStatus: "UNDELIVERED",
+      deliveredDate: "",
+    })).toMatchObject({ outcome: "NDR_OPEN", isDelivered: false, isNdr: true });
+  });
+
+  it("keeps RTO precedence over a populated delivered date", () => {
+    expect(resolveCanonicalDeliveryState({
+      shipmentStatus: "RTO",
+      currentStatus: "RTO",
+      deliveredDate: "27 08 2026 16:10:00",
+    })).toMatchObject({ outcome: "RTO", isDelivered: false, isRto: true });
+  });
+
   it("gives order_status=new cancellation precedence", () => {
     expect(resolveCanonicalDeliveryState({
       shipmentStatus: "Delivered",
@@ -65,5 +92,15 @@ describe("canonical delivery outcome regressions", () => {
     expect(migration).not.toContain("coalesce(o.current_status, '') ilike '%delivered%'");
     expect(migration).toContain("when delivery_outcome = 'DELIVERED' then");
     expect(migration).toContain("when delivery_outcome = 'CANCELLED' then 'CANCELLED'");
+  });
+
+  it("normalizes the production delivered-date format in the parity migration", () => {
+    const migration = readFileSync(resolve(process.cwd(), "supabase/migrations/052_canonical_delivery_date_parity.sql"), "utf8");
+    expect(migration).toContain("when nullif(btrim(p.shiprocket_delivered_date_raw), '') is not null then 'DELIVERED'");
+    expect(migration).toContain("to_timestamp(p.shiprocket_delivered_date_raw, 'DD MM YYYY HH24:MI:SS')");
+    expect(migration).toContain("substring(p.shiprocket_delivered_date_raw, 4, 2) between '01' and '12'");
+    expect(migration).toContain("substring(p.shiprocket_delivered_date_raw, 12, 2) between '00' and '23'");
+    expect(migration).toContain("p.shiprocket_delivered_date_raw ~ '^\\d{4}-\\d{2}-\\d{2}([ T]\\d{2}:\\d{2}:\\d{2}(Z|[+-]\\d{2}:\\d{2})?)?$'");
+    expect(migration).toContain("when delivery_outcome = 'RTO' then 'RTO'");
   });
 });
