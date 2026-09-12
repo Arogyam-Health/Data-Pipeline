@@ -175,7 +175,7 @@ async function scopedRemittanceStats(request: ShiprocketFilterRequest, srOrderId
 async function loadScopedRemittanceRows(request: ShiprocketFilterRequest, srOrderIds: string[]) {
   const supabase = getSupabaseClient();
   const { data, error } = await supabase
-    .from("shiprocket_remittance_orders")
+    .from("shiprocket_effective_remittance_orders")
     .select("id,crf_id,utr,awb,order_id,remittance_date,total_adjusted_amt,match_status,matched_sr_order_id")
     .limit(20000);
   if (error) throw new Error(`Remittance scope query failed: ${error.message}`);
@@ -569,7 +569,7 @@ export async function queryShiprocketRemittances(request: ShiprocketFilterReques
     metadataOnly ? Promise.resolve([] as string[]) : filteredShiprocketIds(request),
     supabase
       .from("shiprocket_remittance_imports")
-      .select("id, file_name, file_hash, source, awb_rows_read, awb_rows_upserted, crf_rows_read, crf_rows_upserted, matched_orders, unmatched_orders, ambiguous_orders, matched_by_awb, matched_by_order_id, matched_by_shopify_format, status, started_at, completed_at, error_message")
+      .select("id, file_name, file_hash, source, awb_rows_read, awb_rows_upserted, crf_rows_read, crf_rows_upserted, matched_orders, unmatched_orders, ambiguous_orders, matched_by_awb, matched_by_order_id, matched_by_shopify_format, status, is_active, started_at, completed_at, error_message")
       .order("created_at", { ascending: false })
       .limit(100),
   ]);
@@ -809,7 +809,7 @@ async function loadRemittanceQuality(request: ShiprocketFilterRequest): Promise<
   const supabase = getSupabaseClient();
   const [selectedIds, latest] = await Promise.all([
     filteredShiprocketIds(request),
-    supabase.from("shiprocket_remittance_imports").select("completed_at, file_name, status").eq("status", "completed").order("created_at", { ascending: false }).limit(1).maybeSingle(),
+    supabase.from("shiprocket_remittance_imports").select("completed_at, file_name, status, is_active").eq("status", "completed").eq("is_active", true).order("created_at", { ascending: false }).limit(1).maybeSingle(),
   ]);
   const list = await loadScopedRemittanceRows(request, selectedIds);
   const matchedCount = list.filter((row) => row.match_status === "matched").length;

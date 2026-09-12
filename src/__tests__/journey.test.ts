@@ -168,6 +168,23 @@ describe("customer journey and profitability", () => {
     expect(rows[0].remittance_match_method).toBe("AWB");
   });
 
+  it("clears stale remittance state when effective evidence is absent", () => {
+    const [row] = mergeCanonicalRemittance([
+      {
+        shopify_order_id: "O1", shiprocket_sr_order_id: "SR1", payment_type: "COD",
+        is_delivered: true, remittance_status: "REMITTED", has_remittance_match: true,
+        crf_id: "STALE", utr: "STALE-UTR", latest_remitted_at: "2026-09-09",
+        remitted_amount: 10140,
+      },
+    ], []);
+    expect(row.remittance_status).toBe("DELIVERED_NOT_REMITTED");
+    expect(row.has_remittance_match).toBe(false);
+    expect(row.crf_id).toBeNull();
+    expect(row.utr).toBeNull();
+    expect(row.latest_remitted_at).toBeNull();
+    expect(row.remitted_amount).toBeNull();
+  });
+
   it("keeps order value separate from the AWB adjustment", () => {
     const [row] = mergeCanonicalRemittance(
       [{ shopify_order_id: "O1", shiprocket_sr_order_id: "SR1", remittance_status: "DELIVERED_NOT_REMITTED" }],

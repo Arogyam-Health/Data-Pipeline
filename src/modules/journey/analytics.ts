@@ -114,12 +114,31 @@ async function fetchAllJourney(filters: JourneyFilter): Promise<JourneyRow[]> {
     const queryFilters = (filters.remittanceStatus || filters.delivered || filters.shipmentStatus)
       ? { ...filters, remittanceStatus: undefined, delivered: undefined, shipmentStatus: undefined }
       : filters;
+    // REMITTED is established by the effective remittance merge below, so the
+    // mart's remittance_status cannot be used as the source filter. We can,
+    // however, safely narrow this one status at the database boundary using
+    // the effective matched SR IDs. This avoids scanning the entire Journey
+    // cohort and then discarding almost all rows in Node.
+    let effectiveRemittanceSrIds: string[] | null = null;
+    if (filters.remittanceStatus === "REMITTED") {
+      const { data: remittanceIds, error: remittanceIdError } = await client
+        .from("shiprocket_effective_remittance_orders")
+        .select("matched_sr_order_id")
+        .eq("match_status", "matched")
+        .not("matched_sr_order_id", "is", null)
+        .limit(20000);
+      if (remittanceIdError) throw new Error(`Journey remittance scope lookup failed: ${remittanceIdError.message}`);
+      effectiveRemittanceSrIds = [...new Set((remittanceIds || [])
+        .map((row) => String(row.matched_sr_order_id || ""))
+        .filter(Boolean))];
+      if (!effectiveRemittanceSrIds.length) return [];
+    }
     const rows: JourneyRow[] = [];
     for (let offset = 0; offset < 20000; offset += 1000) {
       let query = client.from("mart_order_journey_remittance").select(JOURNEY_COLUMNS);
-      query = applyJourneyFilters(query, queryFilters)
-        .order("shopify_order_id", { ascending: true })
-        .range(offset, offset + 999);
+      query = applyJourneyFilters(query, queryFilters);
+      if (effectiveRemittanceSrIds) query = query.in("shiprocket_sr_order_id", effectiveRemittanceSrIds);
+      query = query.order("shopify_order_id", { ascending: true }).range(offset, offset + 999);
       const { data, error } = await query;
       if (error) throw new Error(`Journey query failed: ${error.message}`);
       rows.push(...((data || []) as unknown as JourneyRow[]));
@@ -159,7 +178,7 @@ async function fetchAllJourney(filters: JourneyFilter): Promise<JourneyRow[]> {
     const canonicalRemittances: Record<string, unknown>[] = [];
     for (let offset = 0; offset < srIds.length; offset += 500) {
       const ids = srIds.slice(offset, offset + 500);
-      const { data: remittances } = await client.from("shiprocket_remittance_orders")
+      const { data: remittances } = await client.from("shiprocket_effective_remittance_orders")
         .select("matched_sr_order_id,crf_id,utr,remittance_date,order_value,total_adjusted_amt,match_status,match_method,match_reason_code")
         .in("matched_sr_order_id", ids)
         .eq("match_status", "matched");
@@ -194,11 +213,28 @@ export function mergeCanonicalRemittance(
   }
   return rows.map((row) => {
     const match = bySr.get(String(row.shiprocket_sr_order_id || ""));
-    if (!match) return row;
     const payment = String(row.payment_type || "").toUpperCase();
     const gateways = Array.isArray(row.shopify_payment_gateway_names) ? row.shopify_payment_gateway_names.map(String).join(" ") : String(row.shopify_payment_gateway_names || "");
     const isCod = payment === "COD" || String(row.is_cod || "").toLowerCase() === "true" || /cod|cash/i.test(gateways);
     const isDelivered = Boolean(row.is_delivered) || String(row.delivery_outcome || "") === "DELIVERED";
+    if (!match) {
+      return {
+        ...row,
+        has_remittance_match: false,
+        remittance_match_status: "NOT_MATCHED",
+        remittance_match_method: null,
+        remittance_match_reason_code: null,
+        remittance_status: !isCod ? "NOT_APPLICABLE" : isDelivered ? "DELIVERED_NOT_REMITTED" : "NOT_REMITTED",
+        remittance_order_value_total: null,
+        latest_total_adjusted_amt: null,
+        latest_remittance_date: null,
+        crf_id: null,
+        utr: null,
+        latest_remitted_at: null,
+        remitted_amount: null,
+        remittance_adjustment: null,
+      };
+    }
     const reconciliationStatus = !isCod
       ? "REMITTANCE_FOUND_NON_COD"
       : isDelivered ? "REMITTED" : "REMITTED_NOT_DELIVERED";
@@ -383,7 +419,7 @@ async function lookupOperationalIdentifier(input: string): Promise<Record<string
     .limit(20);
   const rows = (orders || []) as Record<string, unknown>[];
   if (!rows.length) {
-    const { data: remittanceRows } = await client.from("shiprocket_remittance_orders")
+    const { data: remittanceRows } = await client.from("shiprocket_effective_remittance_orders")
       .select("matched_sr_order_id,crf_id,utr,remittance_date,total_adjusted_amt,match_status")
       .or(`crf_id.eq.${term},utr.eq.${term}`)
       .limit(100);
@@ -400,7 +436,7 @@ async function lookupOperationalIdentifier(input: string): Promise<Record<string
   }
   const ids = rows.map((row) => String(row.sr_order_id || "")).filter(Boolean);
   if (!ids.length) return [];
-  const { data: remittances } = await client.from("shiprocket_remittance_orders")
+  const { data: remittances } = await client.from("shiprocket_effective_remittance_orders")
     .select("matched_sr_order_id,crf_id,utr,remittance_date,total_adjusted_amt,match_status")
     .in("matched_sr_order_id", ids).eq("match_status", "matched");
   return rows.map((row) => {

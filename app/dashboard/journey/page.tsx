@@ -14,7 +14,7 @@ type Summary = {
   channelBreakdown: Record<string, number>; metaBreakdown: Record<string, number>;
 };
 type Detail = { order: Row; attribution: Record<string, unknown> | null; shipment: Record<string, unknown> | null; remittances: Record<string, unknown>[]; timeline: Record<string, unknown>[] };
-type RemittanceImport = Record<string, unknown> & { id: string; status?: string; remittance_date?: string | null; crf_ids?: string[]; source_rows?: number };
+type RemittanceImport = Record<string, unknown> & { id: string; status?: string; is_active?: boolean; remittance_date?: string | null; crf_ids?: string[]; source_rows?: number };
 type RemittanceReconciliation = { importId: string; crfId?: string; summary: Record<string, unknown>; rows: Array<Record<string, unknown>> };
 
 function combineRemittanceReconciliations(items: RemittanceReconciliation[]): RemittanceReconciliation | null {
@@ -137,7 +137,7 @@ export default function JourneyDashboard() {
       setProfitRows(profit.rows || []); setProfitTotals(profit.totals || {}); setProfitScope({ cohort: profit.cohort, meta_reporting: profit.meta_reporting });
       if (freshnessResponse.ok) setFreshness(fresh);
       if (remittanceResponse.ok) {
-        const completed = (remittances.imports || []).filter((item: RemittanceImport) => item.status === "completed");
+        const completed = (remittances.imports || []).filter((item: RemittanceImport) => item.status === "completed" && item.is_active !== false);
         const inRange = completed.filter((item: RemittanceImport) => {
           const dateValue = String(item.remittance_date || "");
           return dateValue && (!filters.from || dateValue >= filters.from) && (!filters.to || dateValue <= filters.to);
