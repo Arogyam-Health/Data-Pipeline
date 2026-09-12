@@ -78,6 +78,7 @@ export async function dispatchPendingDeliveries(): Promise<DispatchResult> {
   const pabblyUrl = process.env.PABBLY_SHIPROCKET_URL;
 
   if (!pabblyUrl) {
+    logger.error("Pabbly dispatch unavailable: PABBLY_SHIPROCKET_URL is not configured");
     return { processed: 0, sent: 0, failed: 0, retried: 0, skipped: 0, errors: ["PABBLY_SHIPROCKET_URL not configured"] };
   }
 
@@ -93,12 +94,26 @@ export async function dispatchPendingDeliveries(): Promise<DispatchResult> {
     .limit(50);
 
   if (fetchError || !deliveries || deliveries.length === 0) {
-    if (fetchError) result.errors.push(fetchError.message);
+    if (fetchError) {
+      result.errors.push(fetchError.message);
+      logger.error("Pabbly pending delivery lookup failed", { error: fetchError.message });
+    } else {
+      logger.info("Pabbly pending delivery lookup returned no ready deliveries");
+    }
     return result;
   }
 
+  logger.info("Pabbly pending deliveries loaded", { delivery_count: deliveries.length });
+
   for (const delivery of deliveries as PabblyDelivery[]) {
     result.processed++;
+
+    logger.info("Pabbly delivery attempt started", {
+      delivery_id: delivery.id,
+      event_id: delivery.event_id,
+      sr_order_id: delivery.sr_order_id ?? undefined,
+      attempt: delivery.attempt_count + 1,
+    });
 
     // Mark as processing
     await supabase
@@ -168,6 +183,12 @@ export async function dispatchPendingDeliveries(): Promise<DispatchResult> {
           status: response.status,
         });
       } else {
+        logger.warn("Pabbly dispatch returned non-success HTTP status", {
+          delivery_id: delivery.id,
+          sr_order_id: delivery.sr_order_id ?? undefined,
+          status: response.status,
+          duration_ms: durationMs,
+        });
         // Non-retryable HTTP error (4xx) or retryable (5xx)
         await handleDispatchFailure(supabase, delivery, attemptNum, new Error(`HTTP ${response.status}`), durationMs);
         if (response.status >= 500) {
@@ -182,6 +203,13 @@ export async function dispatchPendingDeliveries(): Promise<DispatchResult> {
       await handleDispatchFailure(supabase, delivery, attemptNum, err, durationMs);
       result.failed++;
       result.errors.push(err instanceof Error ? err.message : String(err));
+      logger.error("Pabbly delivery attempt threw", {
+        delivery_id: delivery.id,
+        sr_order_id: delivery.sr_order_id ?? undefined,
+        attempt: attemptNum,
+        duration_ms: durationMs,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
