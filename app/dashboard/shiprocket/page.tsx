@@ -7,6 +7,16 @@ import { formatDateInTimeZone } from "@/modules/meta/dates";
 import "./shiprocket-dashboard.css";
 
 type DatePreset = "today" | "yesterday" | "last_7d" | "last_14d" | "last_28d" | "last_30d" | "this_week" | "last_week" | "this_month" | "last_month" | "maximum" | "custom";
+async function readJsonResponse<T>(response: Response): Promise<T> {
+  const body = await response.text();
+  try {
+    return JSON.parse(body) as T;
+  } catch {
+    const preview = body.replace(/\s+/g, " ").trim().slice(0, 160);
+    throw new Error(`${response.url} returned ${response.status} ${response.statusText} instead of JSON${preview ? `: ${preview}` : ""}`);
+  }
+}
+
 function formatDisplayDate(iso: string): string {
   const [year, month, day] = formatDateInTimeZone(new Date(`${iso}T00:00:00Z`), "Asia/Kolkata").split("-");
   return new Date(Date.UTC(Number(year), Number(month) - 1, Number(day))).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
@@ -134,6 +144,18 @@ interface Overview {
   pabblyPending?: number;
   pabblyRetrying?: number;
   pabblyTotalDeliveries?: number;
+}
+
+interface RemittanceResponse {
+  summary: Record<string, unknown> | null;
+  importSummary: Record<string, unknown> | null;
+  crfs: Array<Record<string, unknown>>;
+  imports: Array<Record<string, unknown>>;
+  rows: Array<Record<string, unknown>>;
+  exceptions: Array<Record<string, unknown>>;
+  operationalScope: { rows: number; outsideScope: number };
+  scope: { type: string; importId?: string; fileName?: string };
+  error?: string;
 }
 
 interface AppliedFilter {
@@ -302,16 +324,7 @@ export default function ShiprocketDashboardPage() {
     remittances: unknown[];
   } | null>(null);
   const [showRaw, setShowRaw] = useState(false);
-  const [remittances, setRemittances] = useState<{
-    summary: Record<string, unknown> | null;
-    importSummary: Record<string, unknown> | null;
-    crfs: Array<Record<string, unknown>>;
-    imports: Array<Record<string, unknown>>;
-    rows: Array<Record<string, unknown>>;
-    exceptions: Array<Record<string, unknown>>;
-    operationalScope: { rows: number; outsideScope: number };
-    scope: { type: string; importId?: string; fileName?: string };
-  } | null>(null);
+  const [remittances, setRemittances] = useState<RemittanceResponse | null>(null);
   const [importing, setImporting] = useState(false);
   const [, setImportResult] = useState<Record<string, unknown> | null>(null);
   const [importError, setImportError] = useState<string>("");
@@ -365,7 +378,7 @@ export default function ShiprocketDashboardPage() {
       /* ignore */
     }
     fetch("/api/shiprocket/filter-metadata", { credentials: "include" })
-      .then((r) => r.json())
+      .then((r) => readJsonResponse<{ fields?: FilterField[]; groups?: string[] }>(r))
       .then((data) => {
         setFields(data.fields || []);
         setGroups(data.groups || []);
@@ -421,10 +434,10 @@ export default function ShiprocketDashboardPage() {
         fetch("/api/shiprocket/quality", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: controller.signal }),
         fetch("/api/shiprocket/remittances", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload, ...(remittanceImportId !== "LATEST" ? { remittanceImportId } : {}) }), signal: controller.signal }),
       ]);
-      const ordersBody = await ordersRes.json();
-      const overviewBody = await overviewRes.json();
-      const qualityBody = await qualityRes.json();
-      const remBody = await remRes.json();
+      const ordersBody = await readJsonResponse<{ rows?: OrderRow[]; total?: number; error?: string }>(ordersRes);
+      const overviewBody = await readJsonResponse<{ overview?: Overview; error?: string }>(overviewRes);
+      const qualityBody = await readJsonResponse<{ quality?: Record<string, unknown>; error?: string }>(qualityRes);
+      const remBody = await readJsonResponse<RemittanceResponse>(remRes);
       if (!ordersRes.ok) throw new Error(ordersBody.error || "Query failed");
       if (!overviewRes.ok) throw new Error(overviewBody.error || "Overview failed");
       if (!remRes.ok) throw new Error(remBody.error || "Remittance query failed");
@@ -478,7 +491,8 @@ export default function ShiprocketDashboardPage() {
     const res = await fetch(`/api/shiprocket/orders/${encodeURIComponent(srOrderId)}`, {
       credentials: "include",
     });
-    const body = await res.json();
+    const body = await readJsonResponse<{ order?: OrderRow; rawPayload?: unknown; scans?: unknown[]; remittances?: unknown[]; error?: string }>(res);
+    if (!res.ok) throw new Error(body.error || "Order lookup failed");
     setDetail({
       order: body.order,
       rawPayload: body.rawPayload,
@@ -560,7 +574,7 @@ export default function ShiprocketDashboardPage() {
         credentials: "include",
         body: form,
       });
-      const body = await res.json();
+      const body = await readJsonResponse<{ importId?: string; error?: string }>(res);
       if (!res.ok) throw new Error(body.error || "Import failed");
       setImportResult(body);
       setRemittanceImportId(String(body.importId));

@@ -7,3 +7,14 @@ services:
     startCommand: npm start
     healthCheckPath: /api/health
     autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DISABLE_INTERNAL_SCHEDULER
+        value: "true"
+      - key: SHOPIFY_SYNC_ENABLED
+        value: "false"
+      - key: META_SYNC_ENABLED
+        value: "false"
+      - key: GA4_SYNC_ENABLED
+        value: "false"

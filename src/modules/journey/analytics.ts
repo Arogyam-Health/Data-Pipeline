@@ -21,12 +21,18 @@ const JOURNEY_COLUMNS = [
   "journey_data_quality", "has_remittance_match",
   "has_exact_meta_attribution", "has_shiprocket_match",
 ].join(",");
+// mart_order_journey_ndr is the underlying Journey-grain source used for the
+// bulk fetch. latest_total_adjusted_amt is added only by the remittance
+// wrapper, so it must not be requested from the NDR view.
+const JOURNEY_FETCH_COLUMNS = JOURNEY_COLUMNS.replace(",latest_total_adjusted_amt", "");
 
 const ATTRIBUTION_COLUMNS = [
   "shopify_order_id", "utm_source_raw", "utm_medium_raw", "utm_campaign_raw", "utm_term_raw",
   "utm_content_raw", "attribution_method", "adset_consistency_status", "campaign_consistency_status",
   "tracking_quality",
 ].join(",");
+
+const META_PROFITABILITY_PAGE_SIZE = 1000;
 
 // Supabase filter builders vary after every chained method.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -39,6 +45,18 @@ function clean(value: string | undefined): string | undefined {
 
 function escapeSearch(value: string): string {
   return value.replace(/[%_,()\\]/g, "");
+}
+
+export async function fetchAllMetaProfitabilityRows(
+  fetchPage: (offset: number, pageSize: number) => Promise<Record<string, unknown>[]>,
+): Promise<Record<string, unknown>[]> {
+  const rows: Record<string, unknown>[] = [];
+  for (let offset = 0; ; offset += META_PROFITABILITY_PAGE_SIZE) {
+    const page = await fetchPage(offset, META_PROFITABILITY_PAGE_SIZE);
+    rows.push(...page);
+    if (page.length < META_PROFITABILITY_PAGE_SIZE) break;
+  }
+  return rows;
 }
 
 export function normalizedAttributionStatus(row: Record<string, unknown>): string {
@@ -139,7 +157,7 @@ async function fetchAllJourney(filters: JourneyFilter): Promise<JourneyRow[]> {
       // remittance wrapper here would execute its latest-remittance join for
       // the whole cohort (and can time out before the effective merge runs).
       // The NDR mart contains the same Journey row grain and delivery fields.
-      let query = client.from("mart_order_journey_ndr").select(JOURNEY_COLUMNS);
+      let query = client.from("mart_order_journey_ndr").select(JOURNEY_FETCH_COLUMNS);
       query = applyJourneyFilters(query, queryFilters);
       if (effectiveRemittanceSrIds) query = query.in("shiprocket_sr_order_id", effectiveRemittanceSrIds);
       query = query.order("shopify_order_id", { ascending: true }).range(offset, offset + 999);
@@ -539,21 +557,32 @@ export async function queryProfitability(filters: JourneyFilter, level: Profitab
   const channel = filters.channel || filters.source;
   const exactMetaFilter = !filters.attributionStatus || exactMetaStates.has(filters.attributionStatus);
   const metaApplicable = (!channel || channel === "META") && exactMetaFilter;
-  const [journeyRows, metaResult] = await Promise.all([
+  const [journeyRows, metaRows] = await Promise.all([
     fetchAllJourney(cohortFilters),
     (() => {
-      if (!metaApplicable) return Promise.resolve({ data: [], error: null });
-      let query = client.from("meta_ads_daily").select("date,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,clicks,landing_page_views,purchases,purchase_value,last_synced_at");
-      if (clean(filters.from)) query = query.gte("date", filters.from);
-      if (clean(filters.to)) query = query.lte("date", filters.to);
-      if (clean(filters.campaignId)) query = query.eq("campaign_id", filters.campaignId);
-      if (clean(filters.adsetId)) query = query.eq("adset_id", filters.adsetId);
-      if (clean(filters.adId)) query = query.eq("ad_id", filters.adId);
-      return query.limit(20000);
+      if (!metaApplicable) return Promise.resolve([] as Record<string, unknown>[]);
+      return fetchAllMetaProfitabilityRows(async (offset, pageSize) => {
+        let query = client.from("meta_ads_daily").select("id,ad_account_id,date,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,clicks,landing_page_views,purchases,purchase_value,last_synced_at");
+        if (clean(filters.from)) query = query.gte("date", filters.from);
+        if (clean(filters.to)) query = query.lte("date", filters.to);
+        if (clean(filters.campaignId)) query = query.eq("campaign_id", filters.campaignId);
+        if (clean(filters.adsetId)) query = query.eq("adset_id", filters.adsetId);
+        if (clean(filters.adId)) query = query.eq("ad_id", filters.adId);
+        query = query
+          .order("date", { ascending: true })
+          .order("ad_account_id", { ascending: true })
+          .order("campaign_id", { ascending: true })
+          .order("adset_id", { ascending: true })
+          .order("ad_id", { ascending: true })
+          .order("id", { ascending: true })
+          .range(offset, offset + pageSize - 1);
+        const { data, error } = await query;
+        if (error) throw new Error(`Meta profitability query failed: ${error.message}`);
+        return (data || []) as Record<string, unknown>[];
+      });
     })(),
   ]);
-  if (metaResult.error) throw new Error(`Meta profitability query failed: ${metaResult.error.message}`);
-  const rows = aggregateProfitability((metaResult.data || []) as Record<string, unknown>[], journeyRows, level);
+  const rows = aggregateProfitability(metaRows, journeyRows, level);
   const spend = rows.reduce((sum, row) => sum + row.spend, 0);
   const orderRevenue = rows.reduce((sum, row) => sum + row.order_revenue, 0);
   const currentRevenue = rows.reduce((sum, row) => sum + row.current_revenue, 0);

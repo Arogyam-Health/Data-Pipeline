@@ -1,7 +1,39 @@
-import { aggregateProfitability, canonicalChannel, computeJourneySummary, mergeCanonicalRemittance, normalizedAttributionStatus, splitCohortFilters } from "../modules/journey/analytics";
+import { aggregateProfitability, canonicalChannel, computeJourneySummary, fetchAllMetaProfitabilityRows, mergeCanonicalRemittance, normalizedAttributionStatus, splitCohortFilters } from "../modules/journey/analytics";
 import { reconcileRemittanceRows, summarizeRemittanceReconciliation } from "../modules/journey/reconciliation";
 
 describe("customer journey and profitability", () => {
+  it("loads every Meta profitability page", async () => {
+    const calls: number[] = [];
+    const rows = await fetchAllMetaProfitabilityRows(async (offset, pageSize) => {
+      calls.push(offset);
+      if (offset === 0) return Array.from({ length: pageSize }, (_, index) => ({ spend: index + 1 }));
+      return Array.from({ length: 324 }, (_, index) => ({ spend: index + 1 }));
+    });
+    expect(calls).toEqual([0, 1000]);
+    expect(rows).toHaveLength(1324);
+    expect(rows.reduce((sum, row) => sum + Number(row.spend), 0)).toBe(500500 + 324 * 325 / 2);
+  });
+
+  it("checks the page after an exact page boundary", async () => {
+    const calls: number[] = [];
+    const rows = await fetchAllMetaProfitabilityRows(async (offset, pageSize) => {
+      calls.push(offset);
+      return offset === 0 ? Array.from({ length: pageSize }, () => ({ spend: 1 })) : [];
+    });
+    expect(calls).toEqual([0, 1000]);
+    expect(rows).toHaveLength(1000);
+  });
+
+  it("stops after a short Meta page without dropping rows", async () => {
+    const calls: number[] = [];
+    const rows = await fetchAllMetaProfitabilityRows(async (offset) => {
+      calls.push(offset);
+      return offset === 0 ? Array.from({ length: 324 }, (_, index) => ({ id: index })) : [];
+    });
+    expect(calls).toEqual([0]);
+    expect(new Set(rows.map((row) => row.id)).size).toBe(324);
+  });
+
   it("accounts for every source row and resolves the known stale-delivery case", () => {
     const rows = reconcileRemittanceRows(
       [
