@@ -135,7 +135,11 @@ async function fetchAllJourney(filters: JourneyFilter): Promise<JourneyRow[]> {
     }
     const rows: JourneyRow[] = [];
     for (let offset = 0; offset < 20000; offset += 1000) {
-      let query = client.from("mart_order_journey_remittance").select(JOURNEY_COLUMNS);
+      // Remittance is merged from the effective evidence below. Reading the
+      // remittance wrapper here would execute its latest-remittance join for
+      // the whole cohort (and can time out before the effective merge runs).
+      // The NDR mart contains the same Journey row grain and delivery fields.
+      let query = client.from("mart_order_journey_ndr").select(JOURNEY_COLUMNS);
       query = applyJourneyFilters(query, queryFilters);
       if (effectiveRemittanceSrIds) query = query.in("shiprocket_sr_order_id", effectiveRemittanceSrIds);
       query = query.order("shopify_order_id", { ascending: true }).range(offset, offset + 999);

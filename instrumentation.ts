@@ -53,21 +53,30 @@ export async function register() {
   }
 
   // ----------------------------------------------------
-  // GA4 - KEEP RUNNING INTERNALLY FOR NOW
+  // GA4 INTERNAL SCHEDULER
   // ----------------------------------------------------
-  try {
-    const { startGa4Scheduler } = await import(
-      "@/modules/ga4/scheduler"
-    );
+  // Render/cron-job.org deployments use external scheduling. Keep this
+  // consistent with Shopify and Meta so one deployment cannot run duplicate
+  // syncs when DISABLE_INTERNAL_SCHEDULER=true.
+  if (!disableInternalScheduler) {
+    try {
+      const { startGa4Scheduler } = await import(
+        "@/modules/ga4/scheduler"
+      );
 
-    startGa4Scheduler();
-  } catch (err) {
-    const message =
-      err instanceof Error ? err.message : "unknown scheduler error";
+      startGa4Scheduler();
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "unknown scheduler error";
 
-    console.error(
-      "GA4 scheduler failed to start:",
-      message
+      console.error(
+        "GA4 scheduler failed to start:",
+        message
+      );
+    }
+  } else {
+    console.log(
+      "[Scheduler] GA4 internal scheduler disabled - using external cron"
     );
   }
 }

@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: data-pipeline-server
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
