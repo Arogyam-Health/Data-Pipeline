@@ -198,13 +198,6 @@ export async function runMetaSync(input: RunMetaSyncInput): Promise<SyncRunResul
     });
 
     assertAllowedTestRange(input.mode, range);
-    if (input.mode === "repair" && inclusiveDayCount(range.since, range.until) > env.META_BACKFILL_DAYS) {
-      throw new MetaError(
-        `Repair range exceeds META_BACKFILL_DAYS (${env.META_BACKFILL_DAYS})`,
-        "VALIDATION_ERROR",
-        false
-      );
-    }
 
     runId = await createSyncRun({
       adAccountId,
