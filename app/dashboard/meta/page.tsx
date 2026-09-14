@@ -96,6 +96,7 @@ interface OverviewData {
   funnel: {
     impressions: number;
     clicks: number;
+    link_clicks: number;
     landing_page_views: number;
     adds_to_cart: number;
     checkouts: number;
@@ -591,7 +592,7 @@ export default function MetaDashboard() {
   const funnelRows = data.funnel
     ? [
         { name: "Impressions", value: data.funnel.impressions },
-        { name: "Clicks", value: data.funnel.clicks },
+        { name: "Clicks", value: data.funnel.link_clicks },
         { name: "LPV", value: data.funnel.landing_page_views },
         { name: "ATC", value: data.funnel.adds_to_cart },
         { name: "Checkout", value: data.funnel.checkouts },
@@ -932,7 +933,7 @@ export default function MetaDashboard() {
             </ResponsiveContainer>
             {data.funnel && (
               <p className="text-sm text-gray-600 mt-2">
-                CTR {pct(data.funnel.ctr)} · LPV rate {pct(data.funnel.lpv_rate)} · ATC {pct(data.funnel.atc_rate)} ·
+                Link CTR {pct(data.funnel.impressions > 0 ? data.funnel.link_clicks / data.funnel.impressions : null)} · LPV rate {pct(data.funnel.lpv_rate)} · ATC {pct(data.funnel.atc_rate)} ·
                 Checkout {pct(data.funnel.checkout_rate)} · Purchase {pct(data.funnel.purchase_rate)}
               </p>
             )}

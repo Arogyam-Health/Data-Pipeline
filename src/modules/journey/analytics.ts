@@ -509,13 +509,14 @@ export function aggregateProfitability(
         adset_name: level === "campaign" ? null : String(source.adset_name ?? source.resolved_adset_name ?? "") || null,
         ad_id: level === "ad" ? String(source.ad_id ?? source.resolved_ad_id ?? "") || null : null,
         ad_name: level === "ad" ? String(source.ad_name ?? source.resolved_ad_name ?? "") || null : null,
-        spend: 0, impressions: 0, clicks: 0, landing_page_views: 0, meta_purchases: 0,
+        spend: 0, impressions: 0, clicks: 0, link_clicks: 0, landing_page_views: 0, meta_purchases: 0,
         meta_purchase_value: 0, orders: 0, paid_orders: 0, order_revenue: 0, ordered_revenue: 0,
         current_revenue: 0, shipped: 0, delivered: 0, rto: 0, ndr: 0,
         delivered_revenue: 0, delivered_ordered_revenue: 0, delivered_current_revenue: 0, conflict_orders: 0,
         attribution_coverage: null,
         meta_roas: null, ordered_roas: null, current_shopify_roas: null,
         shopify_roas: null, delivered_roas: null, delivered_current_roas: null,
+        order_gap: null, delivery_gap: null,
       };
       map.set(key, row);
     }
@@ -525,7 +526,9 @@ export function aggregateProfitability(
     const row = ensure(source);
     row.spend += Number(source.spend || 0);
     row.impressions += Number(source.impressions || 0);
-    row.clicks += Number(source.clicks || 0);
+    const linkClicks = Number(source.inline_link_clicks ?? source.link_clicks ?? 0);
+    row.clicks += linkClicks;
+    row.link_clicks += linkClicks;
     row.landing_page_views += Number(source.landing_page_views || 0);
     row.meta_purchases += Number(source.purchases || 0);
     row.meta_purchase_value += Number(source.purchase_value || 0);
@@ -551,17 +554,24 @@ export function aggregateProfitability(
     if (source.is_ndr) row.ndr += 1;
     if (source.hierarchy_conflict) row.conflict_orders += 1;
   }
-  return [...map.values()].map((row) => ({
+  return [...map.values()].map((row) => {
+    const metaRoas = row.spend > 0 ? row.meta_purchase_value / row.spend : null;
+    const orderedRoas = row.spend > 0 ? row.ordered_revenue / row.spend : null;
+    const deliveredRoas = row.spend > 0 ? row.delivered_revenue / row.spend : null;
+    return {
     ...row,
-    meta_roas: row.spend > 0 ? row.meta_purchase_value / row.spend : null,
-    ordered_roas: row.spend > 0 ? row.ordered_revenue / row.spend : null,
+    meta_roas: metaRoas,
+    ordered_roas: orderedRoas,
     current_shopify_roas: row.spend > 0 ? row.current_revenue / row.spend : null,
     // Legacy aliases retain their original ordered-revenue semantics.
     shopify_roas: row.spend > 0 ? row.order_revenue / row.spend : null,
-    delivered_roas: row.spend > 0 ? row.delivered_revenue / row.spend : null,
+    delivered_roas: deliveredRoas,
     delivered_current_roas: row.spend > 0 ? row.delivered_current_revenue / row.spend : null,
+    order_gap: orderedRoas != null && metaRoas != null ? orderedRoas - metaRoas : null,
+    delivery_gap: deliveredRoas != null && orderedRoas != null ? deliveredRoas - orderedRoas : null,
     attribution_coverage: row.orders > 0 ? (row.orders - row.conflict_orders) / row.orders : null,
-  })).sort((a, b) => b.spend - a.spend || b.order_revenue - a.order_revenue);
+    };
+  }).sort((a, b) => b.spend - a.spend || b.order_revenue - a.order_revenue);
 }
 
 export async function queryProfitability(filters: JourneyFilter, level: ProfitabilityLevel) {
@@ -575,7 +585,7 @@ export async function queryProfitability(filters: JourneyFilter, level: Profitab
     (() => {
       if (!metaApplicable) return Promise.resolve([] as Record<string, unknown>[]);
       return fetchAllMetaProfitabilityRows(async (offset, pageSize) => {
-        let query = client.from("meta_ads_daily").select("id,ad_account_id,date,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,clicks,landing_page_views,purchases,purchase_value,last_synced_at");
+        let query = client.from("meta_ads_daily").select("id,ad_account_id,date,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,clicks,inline_link_clicks,landing_page_views,purchases,purchase_value,last_synced_at");
         if (clean(filters.from)) query = query.gte("date", filters.from);
         if (clean(filters.to)) query = query.lte("date", filters.to);
         if (clean(filters.campaignId)) query = query.eq("campaign_id", filters.campaignId);
@@ -614,6 +624,7 @@ export async function queryProfitability(filters: JourneyFilter, level: Profitab
       spend,
       impressions: rows.reduce((sum, row) => sum + row.impressions, 0),
       clicks: rows.reduce((sum, row) => sum + row.clicks, 0),
+      linkClicks: rows.reduce((sum, row) => sum + row.link_clicks, 0),
       landingPageViews: rows.reduce((sum, row) => sum + row.landing_page_views, 0),
       metaPurchases: rows.reduce((sum, row) => sum + row.meta_purchases, 0),
       metaPurchaseValue: rows.reduce((sum, row) => sum + row.meta_purchase_value, 0),
@@ -633,6 +644,8 @@ export async function queryProfitability(filters: JourneyFilter, level: Profitab
       currentShopifyRoas: spend > 0 ? currentRevenue / spend : null,
       deliveredRoas: spend > 0 ? deliveredRevenue / spend : null,
       deliveredCurrentRoas: spend > 0 ? deliveredCurrentRevenue / spend : null,
+      orderGap: spend > 0 ? (orderRevenue - rows.reduce((sum, row) => sum + row.meta_purchase_value, 0)) / spend : null,
+      deliveryGap: spend > 0 ? (deliveredRevenue - orderRevenue) / spend : null,
     },
   };
 }

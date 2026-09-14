@@ -156,9 +156,9 @@ export const PURCHASE_ACTION_TYPES = [
 
 /** Canonical Shopify website purchase priority. These aliases are overlapping provider representations. */
 export const CANONICAL_PURCHASE_ACTION_TYPES = [
+  "purchase",
   "offsite_conversion.fb_pixel_purchase",
   "omni_purchase",
-  "purchase",
 ] as const;
 
 export const WEBSITE_PURCHASE_ACTION_TYPES = [

@@ -1,5 +1,6 @@
 import { aggregateProfitability, canonicalChannel, computeJourneySummary, fetchAllMetaProfitabilityRows, JOURNEY_NDR_FETCH_COLUMNS, mergeCanonicalRemittance, normalizedAttributionStatus, splitCohortFilters } from "../modules/journey/analytics";
 import { reconcileRemittanceRows, summarizeRemittanceReconciliation } from "../modules/journey/reconciliation";
+import { formatProfitMetric, sortProfitabilityRows } from "../modules/journey/profitability";
 
 describe("customer journey and profitability", () => {
   it("uses only columns exposed by the NDR mart for bulk Journey reads", () => {
@@ -140,6 +141,70 @@ describe("customer journey and profitability", () => {
     expect(row.order_revenue).toBe(80000);
     expect(row.delivered_revenue).toBe(52000);
     expect(row.delivered_roas).toBe(5.2);
+  });
+
+  it("uses inline link clicks and exposes signed ROAS gaps at each grain", () => {
+    const [row] = aggregateProfitability(
+      [{ campaign_id: "C1", adset_id: "S1", ad_id: "A1", spend: 1000, clicks: 900, inline_link_clicks: 100, purchases: 2, purchase_value: 3000 }],
+      [{ shopify_order_id: "O1", resolved_campaign_id: "C1", resolved_adset_id: "S1", resolved_ad_id: "A1", meta_attribution_state: "EXACT_AD", ordered_revenue: 2000, is_delivered: true, is_rto: false, is_ndr: false }],
+      "ad",
+    );
+    expect(row.clicks).toBe(100);
+    expect(row.link_clicks).toBe(100);
+    expect(row.meta_roas).toBe(3);
+    expect(row.ordered_roas).toBe(2);
+    expect(row.delivered_roas).toBe(2);
+    expect(row.order_gap).toBe(-1);
+    expect(row.delivery_gap).toBe(0);
+  });
+
+  it("does not fall back to all clicks when inline link clicks are absent", () => {
+    const [row] = aggregateProfitability(
+      [{ campaign_id: "C1", adset_id: "S1", ad_id: "A1", spend: 100, clicks: 900 }],
+      [],
+      "ad",
+    );
+    expect(row.clicks).toBe(0);
+    expect(row.link_clicks).toBe(0);
+  });
+
+  it("keeps missing profitability metrics distinct from numeric zero", () => {
+    expect(formatProfitMetric(null)).toBe("—");
+    expect(formatProfitMetric(undefined)).toBe("—");
+    expect(formatProfitMetric(" ")).toBe("—");
+    expect(formatProfitMetric(0)).toBe("0.00");
+    expect(formatProfitMetric(2.5)).toBe("2.50");
+  });
+
+  it.each(["asc", "desc"] as const)("sorts missing values below real numbers (%s)", (direction) => {
+    const rows = [{ spend: null }, { spend: 0 }, { spend: 5 }];
+    const sorted = sortProfitabilityRows(rows, "spend", direction);
+    expect(sorted.map((row) => row.spend)).toEqual(direction === "asc" ? [0, 5, null] : [5, 0, null]);
+  });
+
+  it.each(["campaign", "adset", "ad"] as const)("keeps %s Meta and Shopify aggregates at separate grain", (level) => {
+    const rows = aggregateProfitability(
+      [
+        { campaign_id: "C1", adset_id: "S1", ad_id: "A1", spend: 100, inline_link_clicks: 10 },
+        { campaign_id: "C1", adset_id: "S1", ad_id: "A2", spend: 200, inline_link_clicks: 20 },
+      ],
+      [{ shopify_order_id: "O1", resolved_campaign_id: "C1", resolved_adset_id: "S1", resolved_ad_id: "A1", meta_attribution_state: "EXACT_AD", ordered_revenue: 500 }],
+      level,
+    );
+    expect(rows.reduce((sum, row) => sum + row.spend, 0)).toBe(300);
+    expect(rows.reduce((sum, row) => sum + row.orders, 0)).toBe(1);
+    expect(rows.reduce((sum, row) => sum + row.ordered_revenue, 0)).toBe(500);
+  });
+
+  it("returns null ROAS gaps when spend is zero", () => {
+    const [row] = aggregateProfitability(
+      [{ campaign_id: "C1", adset_id: "S1", ad_id: "A1", spend: 0, inline_link_clicks: 10, purchases: 1, purchase_value: 100 }],
+      [{ shopify_order_id: "O1", resolved_campaign_id: "C1", resolved_adset_id: "S1", resolved_ad_id: "A1", meta_attribution_state: "EXACT_AD", ordered_revenue: 100, is_delivered: true }],
+      "campaign",
+    );
+    expect(row.meta_roas).toBeNull();
+    expect(row.order_gap).toBeNull();
+    expect(row.delivery_gap).toBeNull();
   });
 
   it("keeps RTO revenue out of delivered revenue", () => {

@@ -300,9 +300,32 @@ describe("Meta insight transformation and action mappings", () => {
     const values = actions.map((action) => ({ ...action, value: 5940 }));
     expect(canonicalPurchaseCount(actions)).toBe(1);
     expect(canonicalPurchaseValue(values)).toBe(5940);
-    expect(canonicalPurchaseCount([{ action_type: "omni_purchase", value: 2 }, { action_type: "purchase", value: 1 }])).toBe(2);
+    expect(canonicalPurchaseCount([{ action_type: "omni_purchase", value: 2 }, { action_type: "purchase", value: 1 }])).toBe(1);
     expect(canonicalPurchaseCount([{ action_type: "purchase", value: 1 }])).toBe(1);
     expect(canonicalPurchaseCount([{ action_type: "add_to_cart", value: 9 }])).toBeNull();
+  });
+
+  it("uses the same purchase priority for count and value, including legitimate zeroes", () => {
+    expect(canonicalPurchaseCount([
+      { action_type: "purchase", value: 0 },
+      { action_type: "offsite_conversion.fb_pixel_purchase", value: 4 },
+      { action_type: "omni_purchase", value: 5 },
+    ])).toBe(0);
+    expect(canonicalPurchaseValue([
+      { action_type: "purchase", value: 0 },
+      { action_type: "offsite_conversion.fb_pixel_purchase", value: 400 },
+      { action_type: "omni_purchase", value: 500 },
+    ])).toBe(0);
+    expect(canonicalPurchaseCount([
+      { action_type: "offsite_conversion.fb_pixel_purchase", value: 4 },
+      { action_type: "omni_purchase", value: 5 },
+    ])).toBe(4);
+    expect(canonicalPurchaseValue([
+      { action_type: "offsite_conversion.fb_pixel_purchase", value: 400 },
+      { action_type: "omni_purchase", value: 500 },
+    ])).toBe(400);
+    expect(canonicalPurchaseCount([{ action_type: "omni_purchase", value: 5 }])).toBe(5);
+    expect(canonicalPurchaseValue([{ action_type: "omni_purchase", value: 500 }])).toBe(500);
   });
 
   it("preserves add-to-cart, checkout, checkout value, LPV, messaging, registration", () => {

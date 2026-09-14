@@ -67,6 +67,7 @@ export type ProfitabilityRow = {
   spend: number;
   impressions: number;
   clicks: number;
+  link_clicks: number;
   landing_page_views: number;
   meta_purchases: number;
   meta_purchase_value: number;
@@ -91,4 +92,6 @@ export type ProfitabilityRow = {
   meta_roas: number | null;
   shopify_roas: number | null;
   delivered_roas: number | null;
+  order_gap: number | null;
+  delivery_gap: number | null;
 };
