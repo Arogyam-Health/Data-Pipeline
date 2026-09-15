@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatProfitMetric, sortProfitabilityRows, type ProfitabilitySortKey } from "@/modules/journey/profitability";
 import "./journey.css";
 
@@ -59,8 +60,51 @@ function money(value: unknown) {
   return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 2 }).format(amount);
 }
 function number(value: unknown) { return Number(value || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 }); }
+function useTooltip<T extends HTMLElement = HTMLElement>() {
+  const triggerRef = useRef<T>(null);
+  const [open, setOpen] = useState(false);
+  const [style, setStyle] = useState<React.CSSProperties>({});
+  const update = useCallback(() => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const width = Math.min(340, window.innerWidth - 20);
+    const left = Math.max(width / 2 + 10, Math.min(rect.left + rect.width / 2, window.innerWidth - width / 2 - 10));
+    const above = rect.top >= 100;
+    setStyle({ left, top: above ? rect.top - 8 : rect.bottom + 8, transform: above ? "translate(-50%, -100%)" : "translateX(-50%)" });
+  }, []);
+  useEffect(() => {
+    if (!open) return;
+    update();
+    const onChange = () => update();
+    window.addEventListener("resize", onChange);
+    window.addEventListener("scroll", onChange, true);
+    return () => { window.removeEventListener("resize", onChange); window.removeEventListener("scroll", onChange, true); };
+  }, [open, update]);
+  return { triggerRef, open, setOpen, style };
+}
+function TooltipPortal({ description, open, style }: { description: string; open: boolean; style: React.CSSProperties }) {
+  if (!open || typeof document === "undefined") return null;
+  return createPortal(<span className="metric-tooltip-portal" role="tooltip" style={style}>{description}</span>, document.body);
+}
+function TooltipTrigger({ label, description, value }: { label: string; description: string; value?: string }) {
+  const tooltip = useTooltip();
+  return <><span ref={tooltip.triggerRef} className="metric-tooltip-trigger" tabIndex={0} aria-label={`${label}: ${description}`} onMouseEnter={() => tooltip.setOpen(true)} onMouseLeave={() => tooltip.setOpen(false)} onFocus={() => tooltip.setOpen(true)} onBlur={() => tooltip.setOpen(false)} onKeyDown={(event) => { if (event.key === "Escape") tooltip.setOpen(false); }}>{value ?? label}</span><TooltipPortal description={description} open={tooltip.open} style={tooltip.style} /></>;
+}
 function metric(value: unknown, label: string, description: string) {
-  return <span className="metric-tooltip" tabIndex={0} aria-label={`${label}: ${description}`}><span aria-hidden="true">{formatProfitMetric(value)}</span><span className="metric-tooltip-content" role="tooltip">{description}</span></span>;
+  return <TooltipTrigger label={label} description={description} value={formatProfitMetric(value)} />;
+}
+function TooltipHeader({ label, description }: { label: string; description: string }) {
+  const tooltip = useTooltip();
+  return <th><span ref={tooltip.triggerRef} className="metric-tooltip-trigger" tabIndex={0} aria-label={`${label}: ${description}`} onMouseEnter={() => tooltip.setOpen(true)} onMouseLeave={() => tooltip.setOpen(false)} onFocus={() => tooltip.setOpen(true)} onBlur={() => tooltip.setOpen(false)} onKeyDown={(event) => { if (event.key === "Escape") tooltip.setOpen(false); }}>{label}</span><TooltipPortal description={description} open={tooltip.open} style={tooltip.style} /></th>;
+}
+function SortableTooltipHeader({ label, description, onSort }: { label: string; description: string; onSort: () => void }) {
+  const tooltip = useTooltip<HTMLTableHeaderCellElement>();
+  const activate = (event: React.KeyboardEvent) => {
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSort(); }
+    if (event.key === "Escape") tooltip.setOpen(false);
+  };
+  return <th className="sortable" ref={tooltip.triggerRef} tabIndex={0} aria-label={`${label}: ${description}. Activate to sort.`} onClick={onSort} onMouseEnter={() => tooltip.setOpen(true)} onMouseLeave={() => tooltip.setOpen(false)} onFocus={() => tooltip.setOpen(true)} onBlur={() => tooltip.setOpen(false)} onKeyDown={activate}><span aria-hidden="true">{label}</span><TooltipPortal description={description} open={tooltip.open} style={tooltip.style} /></th>;
 }
 function percent(part: number, whole: number) { return whole ? `${((part / whole) * 100).toFixed(1)}%` : "—"; }
 function date(value: unknown, includeTime = false) {
@@ -208,8 +252,8 @@ export default function JourneyDashboard() {
     if (profitSort === next) setProfitSortDirection((value) => value === "desc" ? "asc" : "desc");
     else { setProfitSort(next); setProfitSortDirection("desc"); }
   };
-  const metricHeader = (label: string, description: string) => <th><span className="metric-tooltip" tabIndex={0} aria-label={`${label}: ${description}`}><span aria-hidden="true">{label}</span><span className="metric-tooltip-content" role="tooltip">{description}</span></span></th>;
-  const profitHeader = (key: ProfitSort, label: string, description: string) => <th className="sortable" tabIndex={0} aria-label={`${label}: ${description}. Activate to sort.`} onClick={() => toggleProfitSort(key)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleProfitSort(key); } }}><span className="metric-tooltip"><span aria-hidden="true">{label}{profitSort === key ? ` ${profitSortDirection === "asc" ? "↑" : "↓"}` : ""}</span><span className="metric-tooltip-content" role="tooltip">{description}</span></span></th>;
+  const metricHeader = (label: string, description: string) => <TooltipHeader label={label} description={description} />;
+  const profitHeader = (key: ProfitSort, label: string, description: string) => <SortableTooltipHeader label={`${label}${profitSort === key ? ` ${profitSortDirection === "asc" ? "↑" : "↓"}` : ""}`} description={description} onSort={() => toggleProfitSort(key)} />;
   const openOrder = async (id: string) => {
     setDetail(null);
     const response = await fetch(`/api/journey/orders/${encodeURIComponent(id)}`);
