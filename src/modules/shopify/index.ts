@@ -49,3 +49,4 @@ export {
   maskPhone,
   resolveCustomerName,
 } from "./analytics";
+export { loadShopifyBusinessPerformance, calculateBusinessMetrics } from "./business-performance";

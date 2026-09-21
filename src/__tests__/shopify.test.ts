@@ -24,6 +24,8 @@ import {
 } from "../modules/shopify/sync";
 import { childUpsertConflictTarget, computeStaleKeys } from "../modules/shopify/repository";
 import { datePickerRangeToTimestamps } from "../lib/date-range";
+import { buildBusinessPerformanceQuery, isLatestBusinessPerformanceRequest } from "../modules/shopify/business-performance-request";
+import { resolveBusinessDateRange, toBusinessCalendarDate } from "../modules/shopify/business-date";
 import {
   ShopifyAuthError,
   ShopifySyncConflictError,
@@ -42,6 +44,7 @@ import {
   runShopifySync,
   shouldStartLocalShopifyScheduler,
 } from "../modules/shopify";
+import { calculateBusinessMetrics } from "../modules/shopify/business-performance";
 import type { GraphQLResponse, ShopifyOrderNode } from "../modules/shopify/types";
 
 function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
@@ -699,6 +702,114 @@ describe("Shopify schema drift, child cleanup, and analytics safety", () => {
     expect(classifyPaymentCategory(["shopify_payments"])).toBe("PREPAID");
     expect(classifyPaymentCategory(["unknown_gateway"])).toBe("OTHER");
     expect(classifyPaymentCategory([])).toBe("UNKNOWN");
+  });
+});
+
+describe("Shopify Business Performance metrics", () => {
+  const base = (overrides: Record<string, unknown> = {}) => ({
+    shopify_order_id: "1", created_at_shopify: "2026-09-01T00:00:00Z", ordered_revenue: 100,
+    current_revenue: 80, financial_status: "paid", payment_type: "COD", is_shipped: true,
+    is_delivered: true, is_rto: false, is_ndr: false, had_ndr: false, is_cancelled: false,
+    remittance_status: "REMITTED", remitted_amount: 75, has_remittance_match: true,
+    utm_source_raw: "google", utm_medium_raw: "cpc", utm_campaign_raw: "campaign",
+    utm_content_raw: "content", utm_term_raw: "term", ...overrides,
+  });
+
+  it("calculates the scoped business definitions without duplicate order joins", () => {
+    const rows = [base(), base({ shopify_order_id: "2", payment_type: "PREPAID", remittance_status: "NOT_APPLICABLE", remitted_amount: 0, is_delivered: false, is_shipped: true, is_ndr: true, had_ndr: true, current_revenue: 50 })];
+    const metrics = calculateBusinessMetrics(rows);
+    expect(metrics.orders).toBe(2);
+    expect(metrics.grossRevenue).toBe(200);
+    expect(metrics.currentRevenue).toBe(130);
+    expect(metrics.deliveredRevenue).toBe(80);
+    expect(metrics.revenueLoss).toBe(120);
+    expect(metrics.revenueSurvivalPct).toBe(40);
+    expect(metrics.paid).toBe(2);
+    expect(metrics.aov).toBe(100);
+    expect(metrics.deliveredAov).toBe(80);
+    expect(metrics.shipRate).toBe(100);
+    expect(metrics.deliveryRate).toBe(50);
+    expect(metrics.rtoRate).toBe(0);
+    expect(metrics.ndrRate).toBe(50);
+    expect(metrics.remitted).toBe(75);
+    expect(calculateBusinessMetrics([base({ cancelled_at: "2026-09-01T00:00:00Z" })]).cancelled).toBe(1);
+  });
+
+  it("returns null for rates with unavailable denominators and preserves zero", () => {
+    const metrics = calculateBusinessMetrics([]);
+    expect(metrics.aov).toBeNull();
+    expect(metrics.deliveredAov).toBeNull();
+    expect(metrics.shipRate).toBeNull();
+    expect(metrics.rtoRate).toBeNull();
+    expect(calculateBusinessMetrics([base({ ordered_revenue: 0, current_revenue: 0 })]).revenueSurvivalPct).toBeNull();
+    expect(calculateBusinessMetrics([base({ is_shipped: false, is_delivered: false, is_rto: false })]).deliveryRate).toBe(0);
+  });
+
+  it("keeps Paid aligned with the existing PAID-only Shopify definition", () => {
+    expect(calculateBusinessMetrics([base({ financial_status: "paid" }), base({ shopify_order_id: "2", financial_status: "partially_paid" })]).paid).toBe(1);
+  });
+
+  it("uses current canonical is_ndr for Open NDR Rate, not historical had_ndr", () => {
+    const metrics = calculateBusinessMetrics([
+      base({ shopify_order_id: "delivered-after-ndr", had_ndr: true, is_ndr: false, is_delivered: true }),
+      base({ shopify_order_id: "rto-after-ndr", had_ndr: true, is_ndr: false, is_delivered: false, is_rto: true }),
+      base({ shopify_order_id: "open-ndr", had_ndr: true, is_ndr: true, is_delivered: false }),
+    ]);
+    expect(metrics.ndr).toBe(1);
+    expect(metrics.ndrRate).toBeCloseTo(33.3333333);
+  });
+
+  it("uses Shopify cancelled_at for Cancel Rate independently of Journey cancellation", () => {
+    const metrics = calculateBusinessMetrics([
+      base({ shopify_order_id: "shopify-cancelled", cancelled_at: "2026-09-01T00:00:00Z", is_cancelled: false }),
+      base({ shopify_order_id: "shiprocket-cancelled", cancelled_at: null, is_cancelled: true }),
+      base({ shopify_order_id: "active", cancelled_at: null, is_cancelled: false }),
+    ]);
+    expect(metrics.cancelled).toBe(1);
+    expect(metrics.cancelRate).toBeCloseTo(33.3333333);
+  });
+
+});
+
+describe("Embedded Shopify Business Performance request scope", () => {
+  const baseInput = {
+    embedded: true as const,
+    from: "2026-09-01",
+    to: "2026-09-21",
+    range: "30d" as const,
+    customFrom: "",
+    customTo: "",
+    level: "source" as const,
+    parents: {},
+  };
+
+  it("uses Journey dates and does not carry Journey outcome filters", () => {
+    const params = buildBusinessPerformanceQuery(baseInput);
+    expect(params.get("range")).toBe("custom");
+    expect(params.get("level")).toBe("source");
+    expect(params.get("from")).toBe("2026-09-01");
+    expect(params.get("to")).toBe("2026-09-21");
+    expect(params.has("shipmentStatus")).toBe(false);
+    expect(params.has("remittanceStatus")).toBe(false);
+    expect(params.has("paymentCategory")).toBe(false);
+  });
+
+  it("keeps presentation hierarchy parents separate from cohort scope", () => {
+    const params = buildBusinessPerformanceQuery({ ...baseInput, level: "campaign", parents: { source: "google", medium: "cpc" } });
+    expect(params.get("source")).toBe("google");
+    expect(params.get("medium")).toBe("cpc");
+    expect(params.get("from")).toBe("2026-09-01");
+    expect(params.get("to")).toBe("2026-09-21");
+  });
+
+  it("prevents an older response from winning a request race", () => {
+    expect(isLatestBusinessPerformanceRequest(10, 11)).toBe(false);
+    expect(isLatestBusinessPerformanceRequest(11, 11)).toBe(true);
+  });
+
+  it("normalizes timestamp inputs to the Asia/Kolkata business calendar", () => {
+    expect(toBusinessCalendarDate("2026-08-31T18:30:00.000Z")).toBe("2026-09-01");
+    expect(resolveBusinessDateRange({ from: "2026-09-01", to: "2026-09-21", range: "custom" })).toEqual({ from: "2026-09-01", to: "2026-09-21" });
   });
 });
 

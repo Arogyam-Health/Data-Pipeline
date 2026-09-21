@@ -6,7 +6,7 @@ const SOURCES = [
   {
     href: "/dashboard/journey",
     title: "Customer Journey & Profitability",
-    body: "Meta attribution → Shopify order → shipment outcome → COD remittance, with campaign and ad drill-down.",
+    body: "Meta profitability, Shopify business performance, order journey, shipment outcome, and COD remittance.",
   },
   {
     href: "/dashboard/shiprocket",
