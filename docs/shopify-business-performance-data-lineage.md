@@ -98,11 +98,35 @@ The backend calculation is centralized in
 | Paid | `financial_status = 'paid'`, matching the existing Shopify KPI RPC | Other statuses, including `partially_paid`, are excluded |
 | AOV | Gross Revenue / Orders | Null when orders are zero |
 | Delivered AOV | Delivered Revenue / Delivered Orders | Null when delivered orders are zero |
-| Ship Rate | `is_shipped orders / Orders × 100` | Null when orders are zero |
+| Ship Rate | `physically shipped orders / Orders × 100` | Canonical `is_shipped` requires matched Shiprocket physical lifecycle evidence; AWB assignment alone is excluded; null when orders are zero |
 | Delivery Rate | `is_delivered orders / Orders × 100` | Null when orders are zero |
 | RTO Rate | `is_rto orders / is_shipped orders × 100` | Null when shipped orders are zero |
 | Open NDR Rate | `is_ndr orders / is_shipped orders × 100` | Currently unresolved NDR/undelivered state; delivered and RTO orders are excluded; null when shipped is zero |
 | Cancel Rate | Shopify orders with non-null normalized `shopify_orders.cancelled_at` / Orders × 100 | Shopify cancellation evidence; separate from Journey shipment cancellation; null when orders are zero |
+
+### Post-shipment outcome funnel
+
+The post-shipment funnel is based only on rows where canonical Journey
+`is_shipped = true`. Canonical `is_shipped` requires a matched Shiprocket
+order plus physical lifecycle evidence: a recognized picked-up, shipped,
+in-transit, out-for-delivery, delivered, RTO, NDR, or undelivered status/scan,
+status ID 7, or a non-empty delivered date. AWB assignment, pickup scheduling,
+and an `OUT FOR PICKUP` scan alone do not qualify. Each shipped order is
+classified exactly once:
+
+- `DELIVERED`: `is_delivered = true`.
+- `RTO_NDR`: `is_rto = true OR is_ndr = true`.
+- `ACTIVE`: neither delivered, RTO, nor open NDR, and the canonical
+  `shiprocket_status_bucket` or raw status is one of picked up, shipped, in
+  transit, or out for delivery.
+- `UNCLASSIFIED`: shipped but not supported by one of the above states; these
+  rows are surfaced explicitly and prevent a false reconciliation claim.
+
+Active Shipment %, Delivered After Shipment %, and RTO + Open NDR % all use
+shipped orders as their denominator. The final buckets are mutually exclusive;
+historical `had_ndr` is not used. Payment and marketing-source breakdowns reuse
+the same classifier and retain UNKNOWN/OTHER payment orders outside the COD /
+PREPAID comparison.
 
 `is_shipped`, `is_delivered`, `is_rto`, and `is_ndr` are consumed from the
 existing canonical Journey source. `had_ndr` remains available as historical
@@ -203,6 +227,11 @@ Difference                    = 0
 ```
 
 The canonical Journey delivery fields were consumed without reclassification.
+The physical-shipment audit found three AWB-only cancelled rows in the
+2026-08-25 through 2026-08-31 cohort; the proposed follow-up migration
+`053_physical_shipment_is_shipped.sql` changes only the canonical
+`is_shipped` evidence rule and leaves delivery, RTO, NDR, and remittance
+classification unchanged.
 The cohort counts were shipped 2,085, delivered 1,767, RTO 235, and historical
 NDR 394.
 

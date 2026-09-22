@@ -163,6 +163,14 @@ export default function JourneyDashboard() {
   const [selectedRemittanceImportId, setSelectedRemittanceImportId] = useState("");
   const [remittanceSelectionMode, setRemittanceSelectionMode] = useState<"auto" | "manual">("auto");
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const search = params.get("search") || "";
+    if (!search && !params.get("from") && !params.get("to")) return;
+    setFilters((current) => ({ ...current, ...(params.get("from") ? { from: params.get("from") as string } : {}), ...(params.get("to") ? { to: params.get("to") as string } : {}), ...(search ? { search } : {}) }));
+    if (search) setDraftSearch(search);
+  }, []);
+
   const params = useMemo(() => {
     const p = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
     Object.entries(filters).forEach(([key, value]) => value && p.set(key, value));

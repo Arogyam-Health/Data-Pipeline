@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { getShopifyAccessToken } from "../modules/shopify/auth";
 import {
   ShopifyGraphqlClient,
@@ -44,7 +46,7 @@ import {
   runShopifySync,
   shouldStartLocalShopifyScheduler,
 } from "../modules/shopify";
-import { calculateBusinessMetrics } from "../modules/shopify/business-performance";
+import { calculateBusinessMetrics, calculatePostShipmentSummary, classifyNotShippedReason, classifyPostShipmentOutcome } from "../modules/shopify/business-performance";
 import type { GraphQLResponse, ShopifyOrderNode } from "../modules/shopify/types";
 
 function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
@@ -706,10 +708,25 @@ describe("Shopify schema drift, child cleanup, and analytics safety", () => {
 });
 
 describe("Shopify Business Performance metrics", () => {
+  it("requires physical shipment evidence for canonical is_shipped", () => {
+    const migration = readFileSync("supabase/migrations/053_physical_shipment_is_shipped.sql", "utf8");
+
+    expect(migration).toContain("p.has_physical_shipment_evidence) as is_shipped");
+    expect(migration).toContain("create or replace function data_pipeline.has_physical_shipment_evidence");
+    expect(migration).not.toContain("p.shiprocket_awb is not null) as is_shipped");
+    expect(migration).toContain("'PICKED UP'");
+    expect(migration).toContain("'OUT FOR DELIVERY'");
+    expect(migration).toContain("'REACHED AT DESTINATION HUB'");
+    expect(migration).toContain("'MISROUTED'");
+    expect(migration).toContain("UNDELIVERED");
+    expect(migration).not.toContain("OUT FOR PICKUP'");
+  });
+
   const base = (overrides: Record<string, unknown> = {}) => ({
-    shopify_order_id: "1", created_at_shopify: "2026-09-01T00:00:00Z", ordered_revenue: 100,
+    shopify_order_id: "1", order_name: "#1", created_at_shopify: "2026-09-01T00:00:00Z", ordered_revenue: 100,
     current_revenue: 80, financial_status: "paid", payment_type: "COD", is_shipped: true,
-    is_delivered: true, is_rto: false, is_ndr: false, had_ndr: false, is_cancelled: false,
+    is_delivered: true, is_rto: false, is_ndr: false, had_ndr: false, is_cancelled: false, delivery_outcome: "DELIVERED",
+    shiprocket_status_raw: "DELIVERED", shiprocket_current_status_raw: "DELIVERED", shiprocket_status_bucket: "delivered", awb: "AWB-1",
     remittance_status: "REMITTED", remitted_amount: 75, has_remittance_match: true,
     utm_source_raw: "google", utm_medium_raw: "cpc", utm_campaign_raw: "campaign",
     utm_content_raw: "content", utm_term_raw: "term", ...overrides,
@@ -743,10 +760,58 @@ describe("Shopify Business Performance metrics", () => {
     expect(metrics.rtoRate).toBeNull();
     expect(calculateBusinessMetrics([base({ ordered_revenue: 0, current_revenue: 0 })]).revenueSurvivalPct).toBeNull();
     expect(calculateBusinessMetrics([base({ is_shipped: false, is_delivered: false, is_rto: false })]).deliveryRate).toBe(0);
+    expect(calculateBusinessMetrics([base({ is_shipped: false, is_delivered: false, is_rto: false })]).notShipped).toBe(1);
+  });
+
+  it("keeps fulfillment entry and not-shipped reasons on the canonical shipment fields", () => {
+    expect(classifyNotShippedReason(base({ is_shipped: false, delivery_outcome: "CANCELLED", is_cancelled: true }))).toBe("CANCELLED_BEFORE_SHIPMENT");
+    expect(classifyNotShippedReason(base({ is_shipped: false, delivery_outcome: "IN_TRANSIT", is_cancelled: false, shiprocket_status_raw: "OUT FOR PICKUP", shiprocket_current_status_raw: "OUT FOR PICKUP" }))).toBe("OUT_FOR_PICKUP");
+    expect(classifyNotShippedReason(base({ is_shipped: false, delivery_outcome: null, is_cancelled: false, shiprocket_status_raw: null, shiprocket_current_status_raw: null, awb: null }))).toBe("NO_SHIPMENT_MATCH");
+    expect(classifyNotShippedReason(base({ is_shipped: false, delivery_outcome: null, is_cancelled: false, shiprocket_status_raw: "PICKUP SCHEDULED", shiprocket_current_status_raw: "PICKUP SCHEDULED" }))).toBe("PICKUP_SCHEDULED");
+    expect(classifyNotShippedReason(base({ is_shipped: false, delivery_outcome: null, is_cancelled: false, shiprocket_status_raw: "NEW", shiprocket_current_status_raw: "NEW", awb: "AWB-2" }))).toBe("PRE_SHIPMENT");
   });
 
   it("keeps Paid aligned with the existing PAID-only Shopify definition", () => {
     expect(calculateBusinessMetrics([base({ financial_status: "paid" }), base({ shopify_order_id: "2", financial_status: "partially_paid" })]).paid).toBe(1);
+  });
+
+  it("reconciles shipped orders into mutually exclusive post-shipment outcomes", () => {
+    const activeStates = ["PICKED UP", "SHIPPED", "IN TRANSIT", "OUT FOR DELIVERY", "REACHED AT DESTINATION HUB", "MISROUTED", "REACHED BACK AT SELLER CITY"];
+    for (const status of activeStates) expect(classifyPostShipmentOutcome(base({ is_shipped: true, is_delivered: false, is_rto: false, is_ndr: false, shiprocket_status_raw: status, shiprocket_current_status_raw: status, shiprocket_status_bucket: "other" }))).toBe("ACTIVE");
+    expect(classifyPostShipmentOutcome(base({ is_shipped: true, is_delivered: true, is_rto: false, is_ndr: false, had_ndr: true }))).toBe("DELIVERED");
+    expect(classifyPostShipmentOutcome(base({ is_shipped: true, is_delivered: false, is_rto: true, is_ndr: false }))).toBe("RTO_NDR");
+    expect(classifyPostShipmentOutcome(base({ is_shipped: true, is_delivered: false, is_rto: false, is_ndr: true }))).toBe("RTO_NDR");
+    const summary = calculatePostShipmentSummary([
+      base({ shopify_order_id: "active", is_shipped: true, is_delivered: false, is_rto: false, is_ndr: false, shiprocket_status_bucket: "in_transit" }),
+      base({ shopify_order_id: "delivered", is_shipped: true, is_delivered: true, had_ndr: true }),
+      base({ shopify_order_id: "rto", is_shipped: true, is_delivered: false, is_rto: true }),
+      base({ shopify_order_id: "ndr", is_shipped: true, is_delivered: false, is_ndr: true }),
+    ]);
+    expect(summary.shipped).toBe(4);
+    expect(summary.active + summary.delivered + summary.rtoNdr).toBe(summary.shipped);
+    expect(summary.countReconciles).toBe(true);
+    expect(summary.percentReconciles).toBe(true);
+  });
+
+  it("does not silently classify shipped unknown states as Active", () => {
+    const summary = calculatePostShipmentSummary([base({ is_shipped: true, is_delivered: false, is_rto: false, is_ndr: false, shiprocket_status_bucket: "other", shiprocket_status_raw: "CANCELLED", shiprocket_current_status_raw: "CANCELED" })]);
+    expect(summary.unclassified).toBe(1);
+    expect(summary.countReconciles).toBe(false);
+  });
+
+  it("keeps COD and PREPAID post-shipment reconciliation separate", () => {
+    const cod = calculatePostShipmentSummary([
+      base({ payment_type: "COD", is_shipped: true, is_delivered: true }),
+      base({ shopify_order_id: "cod-rto", payment_type: "COD", is_shipped: true, is_delivered: false, is_rto: true }),
+    ]);
+    const prepaid = calculatePostShipmentSummary([
+      base({ payment_type: "PREPAID", is_shipped: true, is_delivered: false, is_ndr: true }),
+      base({ shopify_order_id: "prepaid-active", payment_type: "PREPAID", is_shipped: true, is_delivered: false, shiprocket_status_bucket: "in_transit" }),
+    ]);
+    expect(cod.countReconciles).toBe(true);
+    expect(prepaid.countReconciles).toBe(true);
+    expect(cod.shipped).toBe(cod.active + cod.delivered + cod.rtoNdr);
+    expect(prepaid.shipped).toBe(prepaid.active + prepaid.delivered + prepaid.rtoNdr);
   });
 
   it("uses current canonical is_ndr for Open NDR Rate, not historical had_ndr", () => {
