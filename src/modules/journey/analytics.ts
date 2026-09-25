@@ -46,6 +46,9 @@ const ATTRIBUTION_COLUMNS = [
 ].join(",");
 
 const META_PROFITABILITY_PAGE_SIZE = 1000;
+export const JOURNEY_PAGE_SIZE = 500;
+const JOURNEY_QUERY_MAX_ATTEMPTS = 3;
+const JOURNEY_QUERY_RETRY_DELAY_MS = 250;
 
 // Supabase filter builders vary after every chained method.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -58,6 +61,26 @@ function clean(value: string | undefined): string | undefined {
 
 function escapeSearch(value: string): string {
   return value.replace(/[%_,()\\]/g, "");
+}
+
+export function isRetryableJourneyQueryError(error: { message?: string } | null | undefined): boolean {
+  const message = String(error?.message || "").toLowerCase();
+  return ["statement timeout", "canceling statement", "timeout", "fetch failed", "network"].some((term) => message.includes(term));
+}
+
+export async function queryJourneyPageWithRetry<T>(
+  fetchPage: () => Promise<{ data: T[] | null; error: { message?: string } | null }>,
+  sleep: (milliseconds: number) => Promise<void> = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+): Promise<T[]> {
+  let lastError: { message?: string } | null = null;
+  for (let attempt = 0; attempt < JOURNEY_QUERY_MAX_ATTEMPTS; attempt += 1) {
+    const result = await fetchPage();
+    if (!result.error) return result.data || [];
+    lastError = result.error;
+    if (!isRetryableJourneyQueryError(result.error) || attempt === JOURNEY_QUERY_MAX_ATTEMPTS - 1) break;
+    await sleep(JOURNEY_QUERY_RETRY_DELAY_MS * (attempt + 1));
+  }
+  throw new Error(lastError?.message || "Journey query failed");
 }
 
 export async function fetchAllMetaProfitabilityRows(
@@ -165,19 +188,19 @@ async function fetchAllJourney(filters: JourneyFilter): Promise<JourneyRow[]> {
       if (!effectiveRemittanceSrIds.length) return [];
     }
     const rows: JourneyRow[] = [];
-    for (let offset = 0; offset < 20000; offset += 1000) {
+    for (let offset = 0; offset < 20000; offset += JOURNEY_PAGE_SIZE) {
       // Remittance is merged from the effective evidence below. Reading the
       // remittance wrapper here would execute its latest-remittance join for
       // the whole cohort (and can time out before the effective merge runs).
       // The NDR mart contains the same Journey row grain and delivery fields.
-      let query = client.from("mart_order_journey_ndr").select(JOURNEY_NDR_FETCH_COLUMNS);
-      query = applyJourneyFilters(query, queryFilters);
-      if (effectiveRemittanceSrIds) query = query.in("shiprocket_sr_order_id", effectiveRemittanceSrIds);
-      query = query.order("shopify_order_id", { ascending: true }).range(offset, offset + 999);
-      const { data, error } = await query;
-      if (error) throw new Error(`Journey query failed: ${error.message}`);
-      rows.push(...((data || []) as unknown as JourneyRow[]));
-      if (!data || data.length < 1000) break;
+      const data = await queryJourneyPageWithRetry(async () => {
+        let query = client.from("mart_order_journey_ndr").select(JOURNEY_NDR_FETCH_COLUMNS);
+        query = applyJourneyFilters(query, queryFilters);
+        if (effectiveRemittanceSrIds) query = query.in("shiprocket_sr_order_id", effectiveRemittanceSrIds);
+        return await query.order("shopify_order_id", { ascending: true }).range(offset, offset + JOURNEY_PAGE_SIZE - 1);
+      });
+      rows.push(...(data as unknown as JourneyRow[]));
+      if (data.length < JOURNEY_PAGE_SIZE) break;
     }
     const srIds = [...new Set(rows.map((row) => String(row.shiprocket_sr_order_id || "")).filter(Boolean))];
     const scansBySr = new Map<string, Array<Record<string, unknown>>>();
@@ -424,7 +447,12 @@ export function computeJourneySummary(rows: JourneyRow[]) {
 
 export async function queryJourneyOrders(request: JourneyListRequest) {
   const cohortFilters = splitCohortFilters(request);
-  const [cohortRows, outcomeRows] = await Promise.all([fetchAllJourney(cohortFilters), fetchAllJourney(request)]);
+  // These are often two large reads of the layered NDR mart. Running them
+  // concurrently can exceed the database statement budget even though each
+  // read is individually valid. The short-lived cache still reuses identical
+  // requests, while sequential loading keeps the database pressure bounded.
+  const cohortRows = await fetchAllJourney(cohortFilters);
+  const outcomeRows = await fetchAllJourney(request);
   const orderedRows = [...outcomeRows].sort((a, b) => String(b.created_at_shopify || "").localeCompare(String(a.created_at_shopify || "")));
   const from = (request.page - 1) * request.pageSize;
   const pageRows = orderedRows.slice(from, from + request.pageSize);
@@ -662,7 +690,7 @@ export async function getJourneyDetail(shopifyOrderId: string) {
   const journeyRow = journey as unknown as JourneyRow;
   const srOrderId = journeyRow.shiprocket_sr_order_id ? String(journeyRow.shiprocket_sr_order_id) : null;
   const [{ data: shipment }, { data: scans }, { data: remittances }] = srOrderId ? await Promise.all([
-    client.from("shiprocket_orders").select("sr_order_id,created_at_sr,order_date,awb_assigned_date,pickup_scheduled_date,delivered_date,shipment_status,current_status,current_status_id,shipment_status_id,undelivered_reason,undelivered_reason_code,delivery_attempt_count").eq("sr_order_id", srOrderId).maybeSingle(),
+    client.from("shiprocket_orders").select("sr_order_id,created_at_sr,order_date,awb_assigned_date,pickup_scheduled_date,delivered_date,shipment_status,current_status,current_status_id,shipment_status_id,courier_name,undelivered_reason,undelivered_reason_code,delivery_attempt_count").eq("sr_order_id", srOrderId).maybeSingle(),
     client.from("shiprocket_scans").select("scan_index,scan_date,status,sr_status,sr_status_label,activity,location").eq("sr_order_id", srOrderId).order("scan_index", { ascending: true }),
     client.from("shiprocket_remittance_orders").select("crf_id,utr,remittance_date,order_value,total_adjusted_amt,match_status,match_method,match_reason_code").eq("matched_sr_order_id", srOrderId),
   ]) : [{ data: null }, { data: [] }, { data: [] }];

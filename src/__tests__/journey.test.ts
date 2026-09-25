@@ -1,8 +1,29 @@
-import { aggregateProfitability, canonicalChannel, computeJourneySummary, fetchAllMetaProfitabilityRows, JOURNEY_NDR_FETCH_COLUMNS, mergeCanonicalRemittance, normalizedAttributionStatus, splitCohortFilters } from "../modules/journey/analytics";
+import { aggregateProfitability, canonicalChannel, computeJourneySummary, fetchAllMetaProfitabilityRows, isRetryableJourneyQueryError, JOURNEY_NDR_FETCH_COLUMNS, JOURNEY_PAGE_SIZE, mergeCanonicalRemittance, normalizedAttributionStatus, queryJourneyPageWithRetry, splitCohortFilters } from "../modules/journey/analytics";
 import { reconcileRemittanceRows, summarizeRemittanceReconciliation } from "../modules/journey/reconciliation";
 import { formatProfitMetric, sortProfitabilityRows } from "../modules/journey/profitability";
 
 describe("customer journey and profitability", () => {
+  it("uses bounded Journey pages and recognizes only transient query failures as retryable", () => {
+    expect(JOURNEY_PAGE_SIZE).toBe(500);
+    expect(isRetryableJourneyQueryError({ message: "canceling statement due to statement timeout" })).toBe(true);
+    expect(isRetryableJourneyQueryError({ message: "Failed to parse query" })).toBe(false);
+  });
+
+  it("retries a statement timeout and returns the eventual page without retrying permanent errors", async () => {
+    let attempts = 0;
+    const page = await queryJourneyPageWithRetry(
+      async () => {
+        attempts += 1;
+        return attempts === 1
+          ? { data: null, error: { message: "canceling statement due to statement timeout" } }
+          : { data: [{ shopify_order_id: "O1" }], error: null };
+      },
+      async () => undefined,
+    );
+    expect(attempts).toBe(2);
+    expect(page).toEqual([{ shopify_order_id: "O1" }]);
+  });
+
   it("uses only columns exposed by the NDR mart for bulk Journey reads", () => {
     expect(JOURNEY_NDR_FETCH_COLUMNS).toContain("shopify_order_id");
     expect(JOURNEY_NDR_FETCH_COLUMNS).toContain("delivery_outcome");

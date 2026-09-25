@@ -116,9 +116,12 @@ export type BusinessPerformanceResponse = {
 };
 
 const JOURNEY_FIELDS = [
-  "shopify_order_id", "order_name", "created_at_shopify", "ordered_revenue", "current_revenue",
+  "shopify_order_id", "order_name", "order_number", "created_at_shopify", "ordered_revenue", "current_revenue",
   "financial_status", "payment_type", "is_shipped", "is_delivered", "is_rto", "is_ndr",
   "had_ndr", "is_cancelled", "delivery_outcome", "shiprocket_status_raw", "shiprocket_current_status_raw", "shiprocket_status_bucket", "awb", "remittance_status", "remitted_amount", "has_remittance_match",
+  "channel", "meta_attribution_state", "attribution_method",
+  "resolved_campaign_id", "resolved_campaign_name", "resolved_adset_id", "resolved_adset_name", "resolved_ad_id", "resolved_ad_name",
+  "courier_name",
 ].join(",");
 const UTM_FIELDS = "shopify_order_id,utm_source_raw,utm_medium_raw,utm_campaign_raw,utm_content_raw,utm_term_raw";
 const PAGE_SIZE = 1000;
