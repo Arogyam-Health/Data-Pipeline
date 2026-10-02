@@ -156,6 +156,8 @@ export default function JourneyDashboard() {
   const [freshness, setFreshness] = useState<Record<string, unknown>>({});
   const [detail, setDetail] = useState<Detail | null>(null);
   const [loading, setLoading] = useState(true);
+  const loadSequence = useRef(0);
+  const loadAbortController = useRef<AbortController | null>(null);
   const [error, setError] = useState("");
   const [operationalLookup, setOperationalLookup] = useState<Record<string, unknown>[]>([]);
   const [remittanceReconciliation, setRemittanceReconciliation] = useState<RemittanceReconciliation | null>(null);
@@ -178,6 +180,10 @@ export default function JourneyDashboard() {
   }, [filters, page, pageSize]);
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
+    loadAbortController.current?.abort();
+    const controller = new AbortController();
+    loadAbortController.current = controller;
     setLoading(true); setError("");
     try {
       const profitParams = new URLSearchParams({ level });
@@ -185,51 +191,71 @@ export default function JourneyDashboard() {
         const value = filters[key];
         if (value) profitParams.set(key, value);
       });
-      const [ordersResponse, profitResponse, freshnessResponse, remittanceResponse] = await Promise.all([
-        fetch(`/api/journey/orders?${params}`),
-        fetch(`/api/journey/profitability?${profitParams}`),
-        fetch("/api/journey/freshness"),
-        fetch("/api/shiprocket/remittances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ filters: [], search: "", page: 1, pageSize: 1, sort: [], remittanceImportId: "IMPORTS_ONLY" }) }),
+      const [ordersResponse, profitResponse] = await Promise.all([
+        fetch(`/api/journey/orders?${params}`, { signal: controller.signal }),
+        fetch(`/api/journey/profitability?${profitParams}`, { signal: controller.signal }),
       ]);
-      const [orders, profit, fresh, remittances] = await Promise.all([ordersResponse.json(), profitResponse.json(), freshnessResponse.json(), remittanceResponse.json()]);
+      const [orders, profit] = await Promise.all([ordersResponse.json(), profitResponse.json()]);
       if (!ordersResponse.ok) throw new Error(orders.error || "Order journey request failed");
       if (!profitResponse.ok) throw new Error(profit.error || "Profitability request failed");
+      if (sequence !== loadSequence.current || controller.signal.aborted) return;
       setRows(orders.rows || []); setTotal(orders.total || 0); setOperationalLookup(orders.operationalLookup || []); setSummary(orders.outcomeSummary || orders.summary || EMPTY_SUMMARY); setCohortSummary(orders.cohortSummary || orders.summary || EMPTY_SUMMARY);
       setProfitRows(profit.rows || []); setProfitTotals(profit.totals || {}); setProfitScope({ cohort: profit.cohort, meta_reporting: profit.meta_reporting });
-      if (freshnessResponse.ok) setFreshness(fresh);
-      if (remittanceResponse.ok) {
-        const completed = (remittances.imports || []).filter((item: RemittanceImport) => item.status === "completed" && item.is_active !== false);
-        const inRange = completed.filter((item: RemittanceImport) => {
-          const dateValue = String(item.remittance_date || "");
-          return dateValue && (!filters.from || dateValue >= filters.from) && (!filters.to || dateValue <= filters.to);
-        });
-        const uniqueCrfs = new Map<string, RemittanceImport>();
-        for (const item of inRange) {
-          const key = `${(item.crf_ids || []).join(",")}|${item.remittance_date || ""}`;
-          if (!uniqueCrfs.has(key)) uniqueCrfs.set(key, item);
+      setLoading(false);
+
+      // Freshness and remittance reconciliation are secondary panels. Loading
+      // them after the core Journey data prevents a slow remittance query from
+      // blocking the dashboard’s primary KPIs, explorer, and profitability.
+      void (async () => {
+        try {
+          const [freshnessResponse, remittanceResponse] = await Promise.all([
+            fetch("/api/journey/freshness", { signal: controller.signal }),
+            fetch("/api/shiprocket/remittances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ filters: [], search: "", page: 1, pageSize: 1, sort: [], remittanceImportId: "IMPORTS_ONLY" }), signal: controller.signal }),
+          ]);
+          const [fresh, remittances] = await Promise.all([freshnessResponse.json(), remittanceResponse.json()]);
+          if (sequence !== loadSequence.current || controller.signal.aborted) return;
+          if (freshnessResponse.ok) setFreshness(fresh);
+          if (!remittanceResponse.ok) return;
+          const completed = (remittances.imports || []).filter((item: RemittanceImport) => item.status === "completed" && item.is_active !== false);
+          const inRange = completed.filter((item: RemittanceImport) => {
+            const dateValue = String(item.remittance_date || "");
+            return dateValue && (!filters.from || dateValue >= filters.from) && (!filters.to || dateValue <= filters.to);
+          });
+          const uniqueCrfs = new Map<string, RemittanceImport>();
+          for (const item of inRange) {
+            const key = `${(item.crf_ids || []).join(",")}|${item.remittance_date || ""}`;
+            if (!uniqueCrfs.has(key)) uniqueCrfs.set(key, item);
+          }
+          const available = [...uniqueCrfs.values()].sort((a, b) => String(b.remittance_date || "").localeCompare(String(a.remittance_date || "")));
+          setRemittanceImports(available);
+          // Imports are returned newest-first; default to the latest distinct
+          // business CRF by normalized ISO remittance date. Preserve an
+          // explicit user choice only while that CRF remains in the range.
+          const defaultId = String(available[0]?.id || "");
+          const currentIsAvailable = selectedRemittanceImportId === "ALL" || available.some((item) => item.id === selectedRemittanceImportId);
+          const selectedId = remittanceSelectionMode === "manual" && currentIsAvailable ? selectedRemittanceImportId : defaultId;
+          if (selectedId !== selectedRemittanceImportId) setSelectedRemittanceImportId(selectedId);
+          if (remittanceSelectionMode === "manual" && !currentIsAvailable) setRemittanceSelectionMode("auto");
+          const selectedImports = selectedId === "ALL" ? available : available.filter((item) => item.id === selectedId);
+          const bridges = await Promise.all(selectedImports.map(async (item) => {
+            const bridge = await fetch(`/api/journey/remittance-reconciliation?importId=${encodeURIComponent(String(item.id))}&from=${encodeURIComponent(filters.from || "")}&to=${encodeURIComponent(filters.to || "")}`, { signal: controller.signal });
+            return bridge.ok ? await bridge.json() as RemittanceReconciliation : null;
+          }));
+          if (sequence === loadSequence.current && !controller.signal.aborted) setRemittanceReconciliation(combineRemittanceReconciliations(bridges.filter((item): item is RemittanceReconciliation => Boolean(item))));
+        } catch (backgroundError) {
+          if (!(backgroundError instanceof DOMException && backgroundError.name === "AbortError")) console.warn("Journey secondary panels failed to load", backgroundError);
         }
-        const available = [...uniqueCrfs.values()].sort((a, b) => String(b.remittance_date || "").localeCompare(String(a.remittance_date || "")));
-        setRemittanceImports(available);
-        // Imports are returned newest-first; default to the latest distinct
-        // business CRF by normalized ISO remittance date. Preserve an
-        // explicit user choice only while that CRF remains in the range.
-        const defaultId = String(available[0]?.id || "");
-        const currentIsAvailable = selectedRemittanceImportId === "ALL" || available.some((item) => item.id === selectedRemittanceImportId);
-        const selectedId = remittanceSelectionMode === "manual" && currentIsAvailable ? selectedRemittanceImportId : defaultId;
-        if (selectedId !== selectedRemittanceImportId) setSelectedRemittanceImportId(selectedId);
-        if (remittanceSelectionMode === "manual" && !currentIsAvailable) setRemittanceSelectionMode("auto");
-        const selectedImports = selectedId === "ALL" ? available : available.filter((item) => item.id === selectedId);
-        const bridges = await Promise.all(selectedImports.map(async (item) => {
-          const bridge = await fetch(`/api/journey/remittance-reconciliation?importId=${encodeURIComponent(String(item.id))}&from=${encodeURIComponent(filters.from || "")}&to=${encodeURIComponent(filters.to || "")}`);
-          return bridge.ok ? await bridge.json() as RemittanceReconciliation : null;
-        }));
-        setRemittanceReconciliation(combineRemittanceReconciliations(bridges.filter((item): item is RemittanceReconciliation => Boolean(item))));
-      }
-    } catch (err) { setError(err instanceof Error ? err.message : "Journey dashboard failed"); }
-    finally { setLoading(false); }
+      })();
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      if (sequence === loadSequence.current) { setError(err instanceof Error ? err.message : "Journey dashboard failed"); setLoading(false); }
+    }
   }, [params, level, filters, selectedRemittanceImportId, remittanceSelectionMode]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+    return () => loadAbortController.current?.abort();
+  }, [load]);
 
   const update = (name: string, value: string) => {
     setPage(1);
@@ -281,12 +307,13 @@ export default function JourneyDashboard() {
   ];
 
   return (
-    <main className="journey-shell">
+    <main className="journey-shell" aria-busy={loading}>
       <header className="journey-header">
         <div><Link href="/dashboard" className="journey-back">← All dashboards</Link><h1>Customer Journey & Profitability</h1><p>Meta acquisition → Shopify commerce → Shiprocket outcome → COD settlement</p></div>
         <div className="freshness"><strong>Data freshness</strong><span>Meta {date(freshness.meta, true)}</span><span>Shopify {date(freshness.shopify, true)}</span><span>Shiprocket {date(freshness.shiprocket, true)}</span><span>Remittance {date(freshness.remittance, true)}</span></div>
       </header>
 
+      {loading && <div className="journey-loading" role="status" aria-live="polite"><span className="journey-loading-spinner" aria-hidden="true" /> <strong>Loading Customer Journey data…</strong><span>Fetching orders, outcomes, and profitability.</span></div>}
       {error && <div className="journey-error">{error}</div>}
       {operationalLookup.length > 0 && <section className="journey-scope-note"><strong>Operational lookup:</strong> no Shopify journey row matched this exact identifier, but a Shiprocket record was found. {operationalLookup.map((item, index) => <span key={index}> {text(item.result_type)} · SR {text(item.sr_order_id)} · AWB {text(item.awb)} · {text(item.status_bucket || item.current_status)}{item.remittance ? ` · CRF ${text((item.remittance as Record<string, unknown>).crf_id)}` : ""}</span>)} This is a fulfilment/settlement result and is not inserted into the one-row-per-Shopify-order mart.</section>}
       {!loading && <RemittanceReconciliationPanel imports={remittanceImports} selectedId={selectedRemittanceImportId} reconciliation={remittanceReconciliation} onSelect={(id) => { setSelectedRemittanceImportId(id); setRemittanceSelectionMode("manual"); }} />}

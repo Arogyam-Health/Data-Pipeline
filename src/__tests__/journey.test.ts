@@ -1,10 +1,10 @@
-import { aggregateProfitability, canonicalChannel, computeJourneySummary, fetchAllMetaProfitabilityRows, isRetryableJourneyQueryError, JOURNEY_NDR_FETCH_COLUMNS, JOURNEY_PAGE_SIZE, mergeCanonicalRemittance, normalizedAttributionStatus, queryJourneyPageWithRetry, splitCohortFilters } from "../modules/journey/analytics";
+import { aggregateProfitability, canonicalChannel, computeJourneySummary, fetchAllMetaProfitabilityRows, isRetryableJourneyQueryError, JOURNEY_NDR_FETCH_COLUMNS, JOURNEY_PAGE_SIZE, mergeCanonicalRemittance, needsJourneyScanEvidence, normalizedAttributionStatus, queryJourneyPageWithRetry, splitCohortFilters } from "../modules/journey/analytics";
 import { reconcileRemittanceRows, summarizeRemittanceReconciliation } from "../modules/journey/reconciliation";
 import { formatProfitMetric, sortProfitabilityRows } from "../modules/journey/profitability";
 
 describe("customer journey and profitability", () => {
   it("uses bounded Journey pages and recognizes only transient query failures as retryable", () => {
-    expect(JOURNEY_PAGE_SIZE).toBe(500);
+    expect(JOURNEY_PAGE_SIZE).toBe(1000);
     expect(isRetryableJourneyQueryError({ message: "canceling statement due to statement timeout" })).toBe(true);
     expect(isRetryableJourneyQueryError({ message: "Failed to parse query" })).toBe(false);
   });
@@ -22,6 +22,16 @@ describe("customer journey and profitability", () => {
     );
     expect(attempts).toBe(2);
     expect(page).toEqual([{ shopify_order_id: "O1" }]);
+  });
+
+  it.each([
+    [{ is_delivered: false, is_rto: false, delivery_outcome: "IN_TRANSIT" }, true],
+    [{ is_delivered: false, is_rto: false, delivery_outcome: "NDR_OPEN" }, true],
+    [{ is_delivered: true, is_rto: false, delivery_outcome: "DELIVERED" }, false],
+    [{ is_delivered: false, is_rto: true, delivery_outcome: "RTO" }, false],
+    [{ is_delivered: false, is_rto: false, delivery_outcome: "CANCELLED" }, false],
+  ])("only fetches scan evidence when canonical state can still change (%j)", (row, expected) => {
+    expect(needsJourneyScanEvidence(row)).toBe(expected);
   });
 
   it("uses only columns exposed by the NDR mart for bulk Journey reads", () => {

@@ -46,7 +46,9 @@ const ATTRIBUTION_COLUMNS = [
 ].join(",");
 
 const META_PROFITABILITY_PAGE_SIZE = 1000;
-export const JOURNEY_PAGE_SIZE = 500;
+export const JOURNEY_PAGE_SIZE = 1000;
+const JOURNEY_ENRICHMENT_BATCH_SIZE = 500;
+const JOURNEY_ENRICHMENT_CONCURRENCY = 2;
 const JOURNEY_QUERY_MAX_ATTEMPTS = 3;
 const JOURNEY_QUERY_RETRY_DELAY_MS = 250;
 
@@ -68,6 +70,12 @@ export function isRetryableJourneyQueryError(error: { message?: string } | null 
   return ["statement timeout", "canceling statement", "timeout", "fetch failed", "network"].some((term) => message.includes(term));
 }
 
+export function needsJourneyScanEvidence(row: Record<string, unknown> & { is_delivered?: unknown; is_rto?: unknown; delivery_outcome?: unknown }): boolean {
+  if (row.is_delivered === true || row.is_rto === true) return false;
+  const outcome = String(row.delivery_outcome || "").toUpperCase();
+  return !["DELIVERED", "RTO", "CANCELLED"].includes(outcome);
+}
+
 export async function queryJourneyPageWithRetry<T>(
   fetchPage: () => Promise<{ data: T[] | null; error: { message?: string } | null }>,
   sleep: (milliseconds: number) => Promise<void> = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
@@ -81,6 +89,22 @@ export async function queryJourneyPageWithRetry<T>(
     await sleep(JOURNEY_QUERY_RETRY_DELAY_MS * (attempt + 1));
   }
   throw new Error(lastError?.message || "Journey query failed");
+}
+
+async function mapBatches<T, R>(
+  values: T[],
+  batchSize: number,
+  worker: (batch: T[]) => Promise<R[]>,
+): Promise<R[]> {
+  const results: R[] = [];
+  for (let offset = 0; offset < values.length; offset += batchSize * JOURNEY_ENRICHMENT_CONCURRENCY) {
+    const batches = Array.from({ length: JOURNEY_ENRICHMENT_CONCURRENCY }, (_, index) =>
+      values.slice(offset + index * batchSize, offset + (index + 1) * batchSize),
+    ).filter((batch) => batch.length > 0);
+    const completed = await Promise.all(batches.map(worker));
+    results.push(...completed.flat());
+  }
+  return results;
 }
 
 export async function fetchAllMetaProfitabilityRows(
@@ -203,17 +227,21 @@ async function fetchAllJourney(filters: JourneyFilter): Promise<JourneyRow[]> {
       if (data.length < JOURNEY_PAGE_SIZE) break;
     }
     const srIds = [...new Set(rows.map((row) => String(row.shiprocket_sr_order_id || "")).filter(Boolean))];
+    const scanSrIds = [...new Set(rows
+      .filter((row) => needsJourneyScanEvidence(row))
+      .map((row) => String(row.shiprocket_sr_order_id || ""))
+      .filter(Boolean))];
     const scansBySr = new Map<string, Array<Record<string, unknown>>>();
-    for (let offset = 0; offset < srIds.length; offset += 500) {
-      const ids = srIds.slice(offset, offset + 500);
+    const scanRows = await mapBatches(scanSrIds, JOURNEY_ENRICHMENT_BATCH_SIZE, async (ids) => {
       const { data: scans, error: scanError } = await client.from("shiprocket_scans")
         .select("sr_order_id,scan_date,status,sr_status,sr_status_label,activity")
         .in("sr_order_id", ids);
       if (scanError) throw new Error(`Journey delivery scan lookup failed: ${scanError.message}`);
-      for (const scan of scans || []) {
-        const key = String(scan.sr_order_id);
-        scansBySr.set(key, [...(scansBySr.get(key) || []), scan as Record<string, unknown>]);
-      }
+      return (scans || []) as Array<Record<string, unknown>>;
+    });
+    for (const scan of scanRows) {
+      const key = String(scan.sr_order_id);
+      scansBySr.set(key, [...(scansBySr.get(key) || []), scan]);
     }
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index];
@@ -233,15 +261,13 @@ async function fetchAllJourney(filters: JourneyFilter): Promise<JourneyRow[]> {
     // The Day-3 view historically gated remittance status on COD, which made
     // valid delivered matches disappear when Shopify payment enrichment was
     // unavailable. Match by the importer-established matched_sr_order_id.
-    const canonicalRemittances: Record<string, unknown>[] = [];
-    for (let offset = 0; offset < srIds.length; offset += 500) {
-      const ids = srIds.slice(offset, offset + 500);
+    const canonicalRemittances = await mapBatches(srIds, JOURNEY_ENRICHMENT_BATCH_SIZE, async (ids) => {
       const { data: remittances } = await client.from("shiprocket_effective_remittance_orders")
         .select("matched_sr_order_id,crf_id,utr,remittance_date,order_value,total_adjusted_amt,match_status,match_method,match_reason_code")
         .in("matched_sr_order_id", ids)
         .eq("match_status", "matched");
-      canonicalRemittances.push(...((remittances || []) as Record<string, unknown>[]));
-    }
+      return (remittances || []) as Record<string, unknown>[];
+    });
     const canonicalRows = mergeCanonicalRemittance(rows, canonicalRemittances);
     const deliveryFiltered = canonicalRows.filter((row) =>
       (!filters.delivered || (filters.delivered === "true" ? Boolean(row.is_delivered) : !row.is_delivered))
