@@ -4,7 +4,7 @@ import { formatProfitMetric, sortProfitabilityRows } from "../modules/journey/pr
 
 describe("customer journey and profitability", () => {
   it("uses bounded Journey pages and recognizes only transient query failures as retryable", () => {
-    expect(JOURNEY_PAGE_SIZE).toBe(1000);
+    expect(JOURNEY_PAGE_SIZE).toBe(500);
     expect(isRetryableJourneyQueryError({ message: "canceling statement due to statement timeout" })).toBe(true);
     expect(isRetryableJourneyQueryError({ message: "Failed to parse query" })).toBe(false);
   });

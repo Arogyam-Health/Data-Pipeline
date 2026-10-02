@@ -46,7 +46,9 @@ const ATTRIBUTION_COLUMNS = [
 ].join(",");
 
 const META_PROFITABILITY_PAGE_SIZE = 1000;
-export const JOURNEY_PAGE_SIZE = 1000;
+// The layered Journey view can exceed Supabase's statement timeout when a
+// single request asks for 1,000 rows. Keep pages below that threshold.
+export const JOURNEY_PAGE_SIZE = 500;
 const JOURNEY_ENRICHMENT_BATCH_SIZE = 500;
 const JOURNEY_ENRICHMENT_CONCURRENCY = 2;
 const JOURNEY_QUERY_MAX_ATTEMPTS = 3;
